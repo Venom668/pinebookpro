@@ -1,0 +1,125 @@
+pkgname=sweet-theme-git
+pkgver=r210.d997b6c
+pkgrel=1
+pkgdesc="A dark and modern theme"
+arch=(any)
+url="https://github.com/EliverLara/Sweet"
+license=('GPL3')
+depends=('konsole' 'kvantum-qt5' 'kwin' 'plasma-desktop' 'sddm' 'plymouth')
+makedepends=('git')
+provides=('sweet-kde-git' 'aurorae-theme-sweet' 'kvantum-theme-sweet-git' 'sddm-theme-sweet' 'sweet-gtk-theme' 'sweet-cursor-theme-git' 'sweet-wallpapers' 'sweet-folders-icons-git' 'candy-icons-git' 'plasma-splash-sweet-arch-git')
+conflicts=('sweet-kde-git' 'aurorae-theme-sweet' 'kvantum-theme-sweet-git' 'sddm-theme-sweet' 'sweet-gtk-theme' 'sweet-cursor-theme-git' 'sweet-wallpapers' 'sweet-folders-icons-git' 'candy-icons-git' 'plasma-splash-sweet-arch-git')
+options=('!strip')
+source=("git+https://github.com/EliverLara/Sweet.git#branch=nova"
+        "git+https://github.com/EliverLara/Sweet-kde.git"
+        "git+https://github.com/EliverLara/Sweet-folders.git"
+        "git+https://github.com/EliverLara/candy-icons"
+        "git+https://github.com/abrahammurciano/plasma-splash-sweet-arch"
+        "git+https://github.com/abrahammurciano/plymouth-theme-sweet-arch"
+        "https://raw.githubusercontent.com/pavelxdd/plymouth-theme-sweet-arch/main/sweet-arch/entry.png"
+        "https://raw.githubusercontent.com/pavelxdd/plymouth-theme-sweet-arch/main/sweet-arch/dot.png"
+        "plymouth.patch")
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'a6b52fa6a4d701996c324f06b4090df3c6716b5619044098525c08f65a807454'
+            '854fb2fe636df02e27816862b51b3c9bf3d04e3bcd50daff2a391503036b3617'
+            '7046a2b821560e1b12344fcc8a96d726ca80fbd90e231187594531183539382d')
+
+pkgver() {
+  cd "${srcdir}/Sweet"
+  
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+
+    # GTK
+    cd "${srcdir}/Sweet"
+    install -d "${pkgdir}/usr/share/themes/Sweet"
+    mv assets cinnamon gnome-shell gtk-2.0 gtk-3.0 metacity-1 xfwm4 index.theme "${pkgdir}/usr/share/themes/Sweet"
+    find "${pkgdir}/usr/share/themes/Sweet" -name "*.scss" -exec rm -f {} \;
+    rm "${pkgdir}"/usr/share/themes/Sweet/{cinnamon/thumbnail.png,gtk-2.0/{assets{.svg,.txt},links.fish,render-assets.sh}}
+
+
+    # Plasma, Konsole, SDDM
+    # Temporary: https://github.com/EliverLara/Sweet/issues/78
+    cd "${srcdir}/Sweet/kde"
+    rm aurorae/.shade.svg
+    install -d "${pkgdir}"/usr/share/{aurorae/themes,color-schemes,plasma/look-and-feel/com.github.eliverlara.sweet,sddm/themes/sweet}
+    mv aurorae/* "${pkgdir}/usr/share/aurorae/themes"
+    mv colorschemes/Sweet.colors "${pkgdir}/usr/share/color-schemes"
+    mv konsole "${pkgdir}/usr/share"
+    mv look-and-feel/* "${pkgdir}/usr/share/plasma/look-and-feel/com.github.eliverlara.sweet"
+    sed -i "s/X-KDE-PluginInfo-Name=.*/X-KDE-PluginInfo-Name=com.github.eliverlara.sweet/" "${pkgdir}/usr/share/plasma/look-and-feel/com.github.eliverlara.sweet/metadata.desktop"
+    rm -rf "${pkgdir}/usr/share/plasma/look-and-feel/com.github.eliverlara.sweet/contents/osd" # Use default OSD
+    mv sddm/* "${pkgdir}/usr/share/sddm/themes/sweet"
+
+    cd "${srcdir}/Sweet-kde"
+    install -d "${pkgdir}/usr/share/plasma/desktoptheme/sweet"
+    mv dialogs icons widgets colors metadata.desktop "${pkgdir}/usr/share/plasma/desktoptheme/sweet"
+
+
+    # Kvantum
+    cd "${srcdir}/Sweet/kde"
+    install -d "${pkgdir}"/usr/share/Kvantum/{Sweet,Sweet-transparent-toolbar}
+    cp kvantum/Sweet-transparent-toolbar.kvconfig "${pkgdir}/usr/share/Kvantum/Sweet-transparent-toolbar"
+    cp kvantum/Sweet.svg "${pkgdir}/usr/share/Kvantum/Sweet-transparent-toolbar/Sweet-transparent-toolbar.svg"
+    mv kvantum/Sweet.* "${pkgdir}/usr/share/Kvantum/Sweet"
+
+
+    # Icons
+    cd "${srcdir}/Sweet-folders"
+    install -d "${pkgdir}/usr/share/icons"
+    mv Sweet-Purple "${pkgdir}/usr/share/icons"
+    sed -i "s/Inherits=.*/Inherits=candy-icons,breeze-dark,hicolor/" "${pkgdir}/usr/share/icons/Sweet-Purple/index.theme"
+    
+    # Fix symlinks: https://github.com/EliverLara/Sweet-folders/issues/10
+    ln -fs "globe.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/16/folder-html.svg"
+    ln -fs "edit-copy.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/16/folder-documents.svg"
+    ln -fs "edit-copy.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/16/document-multiple.svg"
+    rm "${pkgdir}/usr/share/icons/Sweet-Purple/16/folder-image-people.svg"
+    rm "${pkgdir}/usr/share/icons/Sweet-Purple/16/folder-bookmark.svg"
+    rm "${pkgdir}/usr/share/icons/Sweet-Purple/16/folder-unlocked.svg"
+    rm "${pkgdir}/usr/share/icons/Sweet-Purple/16/user-identity.svg"
+    ln -fs "user-home.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/Places/folder-home.svg"
+    ln -fs "folder-home.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/Places/folder_home.svg"
+    ln -fs "user-home.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/Places/gnome-home.svg"
+    ln -fs "user-home.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/Places/gnome-fs-home.svg"
+    ln -fs "folder-publicshare.svg" "${pkgdir}/usr/share/icons/Sweet-Purple/Places/folder-public.svg"
+
+    cd "${srcdir}/candy-icons"
+    install -d "${pkgdir}/usr/share/icons/candy-icons"
+    mv apps devices places preferences index.theme "${pkgdir}/usr/share/icons/candy-icons"
+    sed -i "s/Inherits=.*/Inherits=breeze-dark,hicolor/" "${pkgdir}/usr/share/icons/candy-icons/index.theme"
+
+
+    # Cursors
+    cd "${srcdir}/Sweet/kde"
+    install -d "${pkgdir}/usr/share/icons"
+    mv cursors/Sweet-cursors "${pkgdir}/usr/share/icons"
+
+
+    # Wallpapers
+    cd "${srcdir}/Sweet"
+    install -d "${pkgdir}/usr/share/wallpapers/Sweet"
+    mv extras/Sweet-Wallpapers/* "${pkgdir}/usr/share/wallpapers/Sweet"
+
+
+    # Splash
+    cd "${srcdir}/plasma-splash-sweet-arch"
+    mv Sweet-Arch "${pkgdir}/usr/share/plasma/look-and-feel/"
+    sed -i '3s/Image/Rectangle/; 5s/source:.*/color: "black"/' "${pkgdir}/usr/share/plasma/look-and-feel/Sweet-Arch/contents/splash/Splash.qml"
+
+
+    # Plymouth
+    cd "${srcdir}/plymouth-theme-sweet-arch"
+    patch -Np1 < "${srcdir}/plymouth.patch"
+    install -d "${pkgdir}/usr/share/plymouth/themes/"
+    mv sweet-arch "${pkgdir}/usr/share/plymouth/themes/"
+    mv "${srcdir}/entry.png" "${pkgdir}/usr/share/plymouth/themes/sweet-arch"
+    mv "${srcdir}/dot.png" "${pkgdir}/usr/share/plymouth/themes/sweet-arch"
+}

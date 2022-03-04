@@ -1,0 +1,51 @@
+pkgname=levinboot
+pkgver=0.8.5
+pkgrel=1
+_tfaver=2.6
+pkgdesc='A bootloader project for the RK3399 SoC.'
+arch=('aarch64')
+url='https://gitlab.com/DeltaGem/levinboot'
+license=('CC0')
+makedepends=('git' 'ninja' 'python3' 'dtc')
+optdepends=('mtd-utils: SPI installation support')
+install=${pkgname}.install
+backup=('boot/levinboot/cmdline.txt')
+source=("https://gitlab.com/DeltaGem/${pkgname}/-/archive/v${pkgver}/${pkgname}-v${pkgver}.tar.gz"
+        "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git/snapshot/trusted-firmware-a-$_tfaver.tar.gz"
+        "${pkgname}.hook"
+        "update-payload.sh")
+sha256sums=('fdd54ce32e85266245670bc269e7fbbd0c8068a95d293c244ea93b0795795181'
+            '4e59f02ccb042d5d18c89c849701b96e6cf4b788709564405354b5d313d173f7'
+            '88f1c22f5dac2d3842e5999064dabf6664bc9fbed27126ee3371b9f912bec844'
+            '658cbfc91cc26496ee692bc761e0ab6590c4ccf54c79573e733ad2c18773c8e2')
+
+prepare() {
+  cd "${srcdir}/${pkgname}-v${pkgver}"
+  mkdir -vp build
+  cd build
+
+  # Modify accordingly to your use case.
+  CFLAGS="-mno-outline-atomics" python ../configure.py \
+  --with-tf-a-headers "${srcdir}/trusted-firmware-a-${_tfaver}/include/export" \
+  --payload-gzip --payload-zstd --payload-lz4 \
+  --payload-initcpio --payload-emmc --payload-sd
+}
+
+build() {
+  unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+  cd "${srcdir}/trusted-firmware-a-${_tfaver}"
+  make PLAT=rk3399
+
+  cd "${srcdir}/${pkgname}-v${pkgver}/build"
+  ninja
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-v${pkgver}/build"
+  mkdir -p "${pkgdir}/boot/${pkgname}/usb"
+  cp usbstage.bin teststage.bin sramstage.bin memtest.bin dramstage.bin levinboot-usb.bin "${pkgdir}/boot/${pkgname}/usb/"
+  cp levinboot-sd.img levinboot-spi.img "${pkgdir}/boot/${pkgname}/"
+  cp "${srcdir}/trusted-firmware-a-${_tfaver}/build/rk3399/release/bl31/bl31.elf" "${pkgdir}/boot/${pkgname}/"
+  cp "${srcdir}/update-payload.sh" "${pkgdir}/boot/${pkgname}/"
+  install -Dm644 "${srcdir}/${pkgname}.hook" "${pkgdir}/usr/share/libalpm/hooks/${pkgname}.hook"
+}

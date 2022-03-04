@@ -1,0 +1,44 @@
+[Trigger]
+Type = File
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/%KERNVER%/*
+Target = usr/lib/modules/%EXTRAMODULES%/*
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/lib/modules/*/vmlinuz
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Path
+Target = usr/lib/initcpio/*
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Path
+Target = boot/Image
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Path
+Target = boot/initramfs-linux.img
+
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = systemd
+
+[Action]
+Description = Updating levinboot payload...
+When = PostTransaction
+Exec = /boot/levinboot/update-payload.sh

@@ -1,0 +1,22 @@
+flash_levinboot() {
+  echo "New version of levinboot can be installed by flashing levinboot-sd.img to sector 64 on the SD card or eMMC, or flashing levinboot-spi.img to the start of SPI flash"
+  echo "You can do that by running:"
+  echo "# dd if=/boot/levinboot/levinboot-sd.img of=/dev/mmcblkX seek=64"
+  echo "or # dd if=/boot/levinboot/levinboot-spi.img of=/dev/mtd0"
+}
+
+post_install() {
+  if [ ! -e /boot/levinboot/cmdline.txt ]; then
+  echo "console=ttyS2,115200 root=LABEL=ROOT_ALARM rw rootwait plymouth.ignore-serial-consoles" > /boot/levinboot/cmdline.txt
+  fi
+  /boot/levinboot/update-payload.sh
+  echo ""
+  flash_levinboot
+  echo "Please verify your kernel parameters in /boot/levinboot/cmdline.txt and update your payload if necessary."
+}
+
+post_upgrade() {
+  /boot/levinboot/update-payload.sh
+  echo ""
+  flash_levinboot
+}

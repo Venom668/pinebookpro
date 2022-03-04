@@ -1,0 +1,137 @@
+--- a/sweet-arch/sweet-arch.script	2021-08-27 09:16:58.029443557 +0200
++++ b/sweet-arch/sweet-arch.script	2021-08-27 09:30:26.769969079 +0200
+@@ -24,8 +24,8 @@
+ 	sprite.SetOpacity(ease_value(min, max, percent));
+ }
+ 
+-Window.SetBackgroundTopColor(0.121, 0, 0.227);
+-Window.SetBackgroundBottomColor(0.121, 0, 0.227);
++Window.SetBackgroundTopColor(0, 0, 0);
++Window.SetBackgroundBottomColor(0, 0, 0);
+ 
+ LOGO = Image("logo.png");
+ LOGO_SPRITE = Sprite();
+@@ -39,6 +39,104 @@
+ MIN_ITERATIONS = 150;
+ MAX_ITERATIONS = 250;
+ 
++fun password_dialogue_setup(prompt) {
++	local.bullet_image;
++	local.entry;
++	local.label;
++	local.cursor;
++
++	bullet_image = Image("dot.png");
++
++	label.image = Image.Text(prompt, 0.9, 0.9, 0.9);
++	label.sprite = Sprite(label.image);
++	position_sprite(label.sprite, 0.5, 0.6);
++	label.sprite.SetZ(10000);
++
++	entry.image = Image("entry.png");
++	entry.sprite = Sprite(entry.image);
++	position_sprite(entry.sprite, 0.5, 0.6);
++	entry.sprite.SetY(entry.sprite.GetY() + label.image.GetHeight() * 2);
++	entry.sprite.SetZ(10000);
++
++	cursor.image = Image.Text("|", 0.9, 0.9, 0.9);
++	cursor.sprite = Sprite(cursor.image);
++	cursor.sprite.SetOpacity(0);
++	cursor.visible = 0;
++	cursor.counter = 0;
++
++	global.password_dialogue = local;
++}
++
++fun password_dialogue_opacity(opacity) {
++	global.password_dialogue.opacity = opacity;
++	local = global.password_dialogue;
++
++	entry.sprite.SetOpacity(opacity);
++	label.sprite.SetOpacity(opacity);
++
++	if (bullets) {
++		for (index = 0; bullets[index]; index++) {
++			bullets[index].SetOpacity(opacity);
++		}
++	}
++
++	if (cursor.visible > 0) {
++		cursor.sprite.SetOpacity(opacity);
++	} else {
++		cursor.sprite.SetOpacity(0);
++	}
++}
++
++fun display_password_dialogue(prompt, bullets) {
++	if (!global.password_dialogue)
++		password_dialogue_setup(prompt);
++	password_dialogue_opacity(1);
++
++	bullet_width = password_dialogue.bullet_image.GetWidth();
++
++	margin = bullet_width / 2;
++	spaces = Math.Int((password_dialogue.entry.image.GetWidth() - (margin * 2)) / (bullet_width / 2));
++
++	bullets_area.width = margin + spaces * (bullet_width / 2);
++	bullets_area.x = Window.GetX() + Window.GetWidth() / 2 - bullets_area.width / 2 - 1;
++	bullets_area.y = password_dialogue.entry.sprite.GetY() +
++					 password_dialogue.entry.image.GetHeight() / 2 -
++					 password_dialogue.bullet_image.GetHeight() / 2 + 1;
++
++	if (bullets > spaces) {
++		bullets = spaces;
++		password_dialogue.cursor.visible = 0;
++	} else {
++		password_dialogue.cursor.visible = 1;
++	}
++
++	for (index = 0; password_dialogue.bullets[index] || index < bullets; index++) {
++		if (!password_dialogue.bullets[index]) {
++			password_dialogue.bullets[index] = Sprite(password_dialogue.bullet_image);
++			password_dialogue.bullets[index].SetX(bullets_area.x + index * bullet_width / 2);
++			password_dialogue.bullets[index].SetY(bullets_area.y);
++			password_dialogue.bullets[index].SetZ(password_dialogue.entry.sprite.GetZ() + 1);
++		}
++
++		if (index < bullets) {
++			password_dialogue.bullets[index].SetOpacity(1);
++		} else {
++			password_dialogue.bullets[index].SetOpacity(0);
++		}
++	}
++
++	password_dialogue.cursor.counter = 0;
++
++	password_dialogue.cursor.sprite.SetX(bullets_area.x + bullets * bullet_width / 2 +
++										 password_dialogue.cursor.image.GetWidth());
++	password_dialogue.cursor.sprite.SetY(password_dialogue.entry.sprite.GetY() +
++										 password_dialogue.entry.image.GetHeight() / 2 -
++										 password_dialogue.cursor.image.GetHeight() / 2 - 1);
++	password_dialogue.cursor.sprite.SetZ(password_dialogue.entry.sprite.GetZ() + 2);
++}
++
++Plymouth.SetDisplayPasswordFunction(display_password_dialogue);
++
+ fun animate() {
+ 	++counter;
+ 	SPINNER_SPRITE.SetImage(SPINNER.Rotate((counter % 100) * 0.06283));
+@@ -48,6 +146,18 @@
+ 		animate_in_opacity(SPINNER_SPRITE, 0, 1, percent);
+ 		animate_in_opacity(LOGO_SPRITE, 0, 1, percent);
+ 		animate_in_zoom(LOGO_SPRITE, LOGO, 0, 1, percent, 0.5, 0.45);
++
++		if (global.password_dialogue)
++			password_dialogue_opacity(ease_value(0, 1, percent));
++	} else {
++		if (global.password_dialogue) {
++			++password_dialogue.cursor.counter;
++			if (password_dialogue.cursor.visible > 0 && (password_dialogue.cursor.counter % 100) < 75) {
++				password_dialogue.cursor.sprite.SetOpacity(1);
++			} else {
++				password_dialogue.cursor.sprite.SetOpacity(0);
++			}
++		}
+ 	}
+ }
+ 

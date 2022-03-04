@@ -1,0 +1,155 @@
+pkgname=ffmpeg-v4l2-request-git
+pkgver=r101799.1cd61e5730
+pkgrel=1
+pkgdesc='FFmpeg with v4l2-request support'
+arch=(aarch64)
+url='https://github.com/jernejsk/FFmpeg'
+license=(GPL3)
+depends=(
+  alsa-lib
+  bzip2
+  fontconfig
+  fribidi
+  gmp
+  gnutls
+  gsm
+  jack
+  lame
+  libass.so
+  libavc1394
+  libbluray.so
+  libdav1d.so
+  libdrm
+  libfreetype.so
+  libiec61883
+  libmodplug
+  libpulse
+  libraw1394
+  librsvg-2.so
+  libsoxr
+  libssh
+  libtheora
+  libva.so
+  libva-drm.so
+  libva-x11.so
+  libvdpau
+  libvidstab.so
+  libvorbisenc.so
+  libvorbis.so
+  libvpx.so
+  libwebp
+  libx11
+  libx264.so
+  libx265.so
+  libxcb
+  libxext
+  libxml2
+  libxv
+  libxvidcore.so
+  libzimg.so
+  opencore-amr
+  openjpeg2
+  opus
+  sdl2
+  speex
+  srt
+  v4l-utils
+  xz
+  zlib
+)
+makedepends=(
+  amf-headers
+  avisynthplus
+  clang
+  git
+  ladspa
+  nasm
+)
+optdepends=(
+  'avisynthplus: AviSynthPlus support'
+  'ladspa: LADSPA filters'
+)
+provides=(
+  libavcodec.so
+  libavdevice.so
+  libavfilter.so
+  libavformat.so
+  libavutil.so
+  libpostproc.so
+  libswresample.so
+  libswscale.so
+  ffmpeg
+)
+conflicts=(ffmpeg)
+source=('git+https://github.com/jernejsk/FFmpeg.git#branch=v4l2-request-hwaccel-4.4')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd FFmpeg
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd FFmpeg
+
+  ./configure \
+    --prefix=/usr \
+    --disable-debug \
+    --disable-static \
+    --disable-stripping \
+    --enable-lto \
+    --enable-amf \
+    --enable-avisynth \
+    --enable-fontconfig \
+    --enable-gmp \
+    --enable-gnutls \
+    --enable-gpl \
+    --enable-ladspa \
+    --enable-libass \
+    --enable-libbluray \
+    --enable-libdav1d \
+    --enable-libdrm \
+    --enable-libfreetype \
+    --enable-libfribidi \
+    --enable-libgsm \
+    --enable-libiec61883 \
+    --enable-libjack \
+    --enable-libmodplug \
+    --enable-libmp3lame \
+    --enable-libopencore_amrnb \
+    --enable-libopencore_amrwb \
+    --enable-libopenjpeg \
+    --enable-libopus \
+    --enable-libpulse \
+    --enable-librsvg \
+    --enable-libsoxr \
+    --enable-libspeex \
+    --enable-libsrt \
+    --enable-libssh \
+    --enable-libtheora \
+    --enable-libv4l2 \
+    --enable-libvidstab \
+    --enable-libvorbis \
+    --enable-libvpx \
+    --enable-libwebp \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libxcb \
+    --enable-libxml2 \
+    --enable-libxvid \
+    --enable-libzimg \
+    --enable-shared \
+    --enable-version3 \
+    --enable-v4l2-request \
+    --enable-libudev \
+    --enable-neon
+
+  make
+  make tools/qt-faststart
+  make doc/ff{mpeg,play}.1
+}
+
+package() {
+  make DESTDIR="${pkgdir}" -C FFmpeg install install-man
+  install -Dm 755 FFmpeg/tools/qt-faststart "${pkgdir}"/usr/bin/
+}
