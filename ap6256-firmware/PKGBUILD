@@ -1,0 +1,33 @@
+# Contributor: Dan Johansen <strit@manjaro.org>
+
+pkgname=ap6256-firmware
+pkgver=2020.11
+pkgrel=1
+arch=('aarch64')
+pkgdesc='Firmware files for the ap6256 wifi/bt module'
+license=('unknown')
+url="https://forums.raspberrypi.com/viewtopic.php?f=117&t=291688"
+depends=('git')
+conflicts=('ap6398s-firmware')
+source=('BCM4345C5.hcd'
+        'brcmfmac43456-sdio.bin'
+        'brcmfmac43456-sdio.clm_blob'
+        'nvram_ap6256.txt')
+sha256sums=('f67164f0eda8d4ca96305e177a61542bf8b470f2f1c456b66fe8c660650f1c7a'
+            '61ce3f0ee6355d46fa586f1279bc7d355c82662b90dbf7fb97f6e9556058bfd4'
+            '2dbd7d22fc9af0eb560ceab45b19646d211bc7b34a1dd00c6bfac5dd6ba25e8a'
+            '1eab5e5b887da68d7690324644bfa15640d9d8985a4bfc4df3c7b8114d1b0e0e')
+
+package() {
+    # Bluetooth firmware
+    install -Dm644 "BCM4345C5.hcd" -t "${pkgdir}/usr/lib/firmware/"
+    install -Dm644 "BCM4345C5.hcd" "${pkgdir}/usr/lib/firmware/brcm/BCM.hcd"
+    install -Dm644 "BCM4345C5.hcd" -t "${pkgdir}/usr/lib/firmware/brcm/"
+    # Wifi firmware
+    install -Dm644 "nvram_ap6256.txt" -t "${pkgdir}/usr/lib/firmware/"
+    install -Dm644 "nvram_ap6256.txt" "${pkgdir}/usr/lib/firmware/brcm/brcmfmac43456-sdio.txt"
+    install -Dm644 "brcmfmac43456-sdio.bin" "${pkgdir}/usr/lib/firmware/brcm/brcmfmac43456-sdio.bin"
+    install -Dm644 "brcmfmac43456-sdio.clm_blob" "${pkgdir}/usr/lib/firmware/brcm/brcmfmac43456-sdio.clm_blob"
+    install -Dm644 "nvram_ap6256.txt" "${pkgdir}/usr/lib/firmware/brcm/brcmfmac43456-sdio.pine64,pinebook-pro.txt"
+}
+
