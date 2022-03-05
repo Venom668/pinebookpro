@@ -1,0 +1,74 @@
+# U-Boot: Pinebook Pro based on PKGBUILD for Rock64
+# Contributor: Dan Johansen <strit@manjaro.org>
+
+pkgname=uboot-pbp
+pkgver=2020.07
+pkgrel=1
+_tfaver=2.5
+pkgdesc="U-Boot for Pinebook Pro"
+arch=('aarch64')
+url='http://www.denx.de/wiki/U-Boot/WebHome'
+license=('GPL')
+makedepends=('git' 'arm-none-eabi-gcc' 'dtc' 'bc' 'python3')
+optdepends=('mtd-utils: SPI installation support')
+provides=('uboot')
+conflicts=('uboot')
+install=${pkgname}.install
+source=("ftp://ftp.denx.de/pub/u-boot/u-boot-${pkgver}.tar.bz2"
+        "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git/snapshot/trusted-firmware-a-$_tfaver.tar.gz"
+        "0001-PBP-Fix-Panel-reset.patch"
+        "0002-Correct-boot-order-to-be-USB-SD-eMMC.patch"
+        "0003-rk3399-light-pinebook-power-and-standby-leds-during-early-boot.patch"
+        "0004-Reduce-bootdelay-to-0.patch"
+        "0005-phy-rockchip-inno-usb2-fix-hang-when-multiple-controllers-exit.patch"
+        "0001-ATF-rk3399-reduce_code_duplication.patch"
+        "0002-ATF-rk3399-gpio-power.patch"
+        "0003-ATF-rk3399-suspend.patch"
+        "0004-ATF-rk3399-fix-dram-section-placement.patch")
+sha256sums=('c1f5bf9ee6bb6e648edbf19ce2ca9452f614b08a9f886f1a566aa42e8cf05f6a'
+            'ad8a2ffcbcd12d919723da07630fc0840c3c2fba7656d1462e45488e42995d7c'
+            'c3ea09a18b766a3ce0728234b097b29e2ed610c7f04b138b7fba42e118a7ae33'
+            'fec8f32af8e2a9dd6f1d8dcc83453ebded74786de03a9be14823261de7421bf3'
+            'd111657a85901cb43fe21cd88709945bc27532d3d5bb3f1e79e78da130208212'
+            '57d3e885c83c1135fc94dc240aa6e006ff48aade781b26d509d0889820b8c7f6'
+            '7652c1bc18ea4266d1fcccb4532690abd315c1079730367b347d3ac10e03527b'
+            '2943a00fff50413fa83c9d0a0ad8a9cc4dd30ffe78ddd3c492c7ac8cc7c35db1'
+            'd1ccba1870bd27b8e5d519e94e6259cd8d3e7562df1276f00a100772497f71ca'
+            '2bd20c2d795e98c2f7f295eebeff2f6def8def095837b62094cadf1cd616e23a'
+            'a32f0601b63659c50112d5d7ffa237a501eff2cc5a9f40a11b2f8248064b51cf')
+
+prepare() {
+  cd "${srcdir}/u-boot-${pkgver}"
+
+  patch -Np1 -i "${srcdir}/0001-PBP-Fix-Panel-reset.patch"
+  patch -Np1 -i "${srcdir}/0002-Correct-boot-order-to-be-USB-SD-eMMC.patch"
+  patch -Np1 -i "${srcdir}/0003-rk3399-light-pinebook-power-and-standby-leds-during-early-boot.patch"
+  patch -Np1 -i "${srcdir}/0004-Reduce-bootdelay-to-0.patch"
+  patch -Np1 -i "${srcdir}/0005-phy-rockchip-inno-usb2-fix-hang-when-multiple-controllers-exit.patch"
+
+  cd "${srcdir}/trusted-firmware-a-${_tfaver}"
+  patch -Np1 -i "${srcdir}/0001-ATF-rk3399-reduce_code_duplication.patch"
+  patch -Np1 -i "${srcdir}/0002-ATF-rk3399-gpio-power.patch"
+  patch -Np1 -i "${srcdir}/0003-ATF-rk3399-suspend.patch"
+  patch -Np1 -i "${srcdir}/0004-ATF-rk3399-fix-dram-section-placement.patch"
+}
+
+build() {
+  unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+
+  cd "${srcdir}/trusted-firmware-a-${_tfaver}"
+  make PLAT=rk3399
+
+  cd "${srcdir}/u-boot-${pkgver}"
+  make pinebook-pro-rk3399_defconfig
+  echo 'CONFIG_IDENT_STRING="Arch Linux ARM"' >> .config
+
+  make BL31="${srcdir}/trusted-firmware-a-${_tfaver}/build/rk3399/release/bl31/bl31.elf"
+}
+
+package() {
+  cd "${srcdir}/u-boot-${pkgver}"
+
+  mkdir -p "${pkgdir}/boot/extlinux"
+  cp idbloader.img u-boot.itb "${pkgdir}/boot/"
+}
