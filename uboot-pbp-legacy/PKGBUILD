@@ -21,6 +21,7 @@ source=("ftp://ftp.denx.de/pub/u-boot/u-boot-${pkgver}.tar.bz2"
         "0003-rk3399-light-pinebook-power-and-standby-leds-during-early-boot.patch"
         "0004-Reduce-bootdelay-to-0.patch"
         "0005-phy-rockchip-inno-usb2-fix-hang-when-multiple-controllers-exit.patch"
+        "0006-rk3399-Pinebook-pro-EDP-support.patch"
         "0001-ATF-rk3399-reduce_code_duplication.patch"
         "0002-ATF-rk3399-gpio-power.patch"
         "0003-ATF-rk3399-suspend.patch"
@@ -32,6 +33,7 @@ sha256sums=('c1f5bf9ee6bb6e648edbf19ce2ca9452f614b08a9f886f1a566aa42e8cf05f6a'
             'd111657a85901cb43fe21cd88709945bc27532d3d5bb3f1e79e78da130208212'
             '57d3e885c83c1135fc94dc240aa6e006ff48aade781b26d509d0889820b8c7f6'
             '7652c1bc18ea4266d1fcccb4532690abd315c1079730367b347d3ac10e03527b'
+            '61cb21ef106f85225a4c345860a602b248c4fcd0398c4f3c1f075ade669d4e98'
             '2943a00fff50413fa83c9d0a0ad8a9cc4dd30ffe78ddd3c492c7ac8cc7c35db1'
             'd1ccba1870bd27b8e5d519e94e6259cd8d3e7562df1276f00a100772497f71ca'
             '2bd20c2d795e98c2f7f295eebeff2f6def8def095837b62094cadf1cd616e23a'
@@ -45,6 +47,7 @@ prepare() {
   patch -Np1 -i "${srcdir}/0003-rk3399-light-pinebook-power-and-standby-leds-during-early-boot.patch"
   patch -Np1 -i "${srcdir}/0004-Reduce-bootdelay-to-0.patch"
   patch -Np1 -i "${srcdir}/0005-phy-rockchip-inno-usb2-fix-hang-when-multiple-controllers-exit.patch"
+  patch -Np1 -i "${srcdir}/0006-rk3399-Pinebook-pro-EDP-support.patch"
 
   cd "${srcdir}/trusted-firmware-a-${_tfaver}"
   patch -Np1 -i "${srcdir}/0001-ATF-rk3399-reduce_code_duplication.patch"
