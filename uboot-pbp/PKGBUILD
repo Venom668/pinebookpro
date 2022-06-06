@@ -2,9 +2,9 @@
 # Contributor: Dan Johansen <strit@manjaro.org>
 
 pkgname=uboot-pbp
-pkgver=2022.01
+pkgver=2022.04
 pkgrel=1
-_tfaver=2.6
+_tfaver=2.7
 pkgdesc="U-Boot for Pinebook Pro"
 arch=('aarch64')
 url='http://www.denx.de/wiki/U-Boot/WebHome'
@@ -23,11 +23,11 @@ source=("ftp://ftp.denx.de/pub/u-boot/u-boot-${pkgver}.tar.bz2"
         "0005-Tweak-config.patch"
         "0006-dts-rockchip-rk3399-enable-emmc-phy-for-spl.patch"
         "0007-mmc-sdhci-allow-disabling-sdma-in-spl.patch")
-sha256sums=('81b4543227db228c03f8a1bf5ddbc813b0bb8f6555ce46064ef721a6fc680413'
-            '4e59f02ccb042d5d18c89c849701b96e6cf4b788709564405354b5d313d173f7'
+sha256sums=('68e065413926778e276ec3abd28bb32fa82abaa4a6898d570c1f48fbdb08bcd0'
+            '53422dc649153838e03820330ba17cb10afe3e330ecde0db11e4d5f1361a33e6'
             'c3ea09a18b766a3ce0728234b097b29e2ed610c7f04b138b7fba42e118a7ae33'
             '017d33aac55f8a5ed22170c97b4792ba755a4dad04f6c0cdd85119bbc81e87b3'
-            'd111657a85901cb43fe21cd88709945bc27532d3d5bb3f1e79e78da130208212'
+            'a64e4bf4eab1565d16b8d7bb9d161664a4d6d191aaeb861e44b0531e41f7e1c3'
             '7652c1bc18ea4266d1fcccb4532690abd315c1079730367b347d3ac10e03527b'
             '3957d4e7efde34cde7480e3f4b7fd0e0fceaa47ab8361b5c0eec095c0ff13663'
             '54a6b35760f86023ad46e3febd5f97d32f0fcdba9b7775c531b452bcaf6d5eef'
