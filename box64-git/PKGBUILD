@@ -1,0 +1,43 @@
+# Maintainer: Bart De Vries <bart at mogwai dot be>
+
+_pkgname=box64
+pkgname=${_pkgname}-git
+pkgver=v0.1.8.r59.g1057b88
+pkgrel=1
+pkgdesc='Linux Userspace x86_64 Emulator with a twist'
+arch=('aarch64')
+url='https://github.com/ptitSeb/box64'
+license=('MIT')
+depends=('gcc-libs')
+makedepends=('git' 'cmake' 'python')
+provides=(box64)
+conflicts=(box64)
+source=("git+https://github.com/ptitSeb/box64.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd ${_pkgname}
+    git describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+    cd ${_pkgname}
+    cmake -B build -S . \
+          -DRK3399=1 \
+          -DARM_DYNAREC=ON \
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          -DCMAKE_INSTALL_PREFIX=/usr
+    make -C build
+}
+
+package() {
+    cd ${_pkgname}/build
+    make DESTDIR=${pkgdir} install
+
+    install -Dm644 ../LICENSE -t "${pkgdir}/usr/share/licenses/${_pkgname}/"
+
+    # Install documentation
+    install -d "${pkgdir}/usr/share/doc/${_pkgname}/"
+    cp -R ../docs/* "${pkgdir}/usr/share/doc/${_pkgname}/"
+
+}
