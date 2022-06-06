@@ -1,5 +1,5 @@
 pkgname=ffmpeg-v4l2-request-git
-pkgver=r101799.1cd61e5730
+pkgver=r101809.5607e918e6
 pkgrel=1
 pkgdesc='FFmpeg with v4l2-request support'
 arch=(aarch64)

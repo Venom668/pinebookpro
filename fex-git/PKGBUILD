@@ -1,0 +1,43 @@
+pkgname=fex-git
+pkgver=FEX.2203.r46.g187c6418
+pkgrel=1
+pkgdesc="A fast usermode x86 and x86-64 emulator for Arm64"
+arch=('aarch64')
+url="https://fex-emu.org"
+license=('MIT')
+depends=()
+makedepends=('git' 'cmake' 'ninja' 'clang' 'lld' 'sdl2' 'libepoxy' 'nasm')
+source=("git+https://github.com/FEX-Emu/FEX.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}"/FEX
+  git describe --long --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/v//g'
+}
+
+prepare() {
+  cd "${srcdir}"/FEX
+  git submodule update --init
+}
+
+build() {
+  cd "${srcdir}"/FEX
+
+  CC=clang CXX=clang++ cmake \
+    -G Ninja \
+    -DENABLE_LTO=True \
+    -DENABLE_STATIC_PIE=False \
+    -DBUILD_TESTS=False \
+    -DENABLE_ASSERTIONS=False \
+    -DENABLE_INTERPRETER=True \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_BUILD_TYPE=Release \
+    -B Build
+  ninja -C Build
+}
+
+package() {
+  cd "${srcdir}"/FEX
+
+  DESTDIR="${pkgdir}" ninja -C Build install
+}

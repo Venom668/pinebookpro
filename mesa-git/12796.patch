@@ -1,0 +1,845 @@
+From 7e538107958ac4296d65fb5d17e08b8ff3d6c826 Mon Sep 17 00:00:00 2001
+From: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Date: Wed, 8 Sep 2021 14:19:40 -0300
+Subject: [PATCH 1/6] gallium: add PIPE_CAP_DRM_RENDER_NODE_FD
+
+In the following commits we'll add support for
+EGL_EXT_device_drm_render_node for the case in which we have split
+display/render SoCs.
+
+In order to do this, we need to query the GPU fd from EGL. So add
+PIPE_CAP_DRM_RENDER_NODE_FD in order to be able to query this
+information from the driver.
+
+We need this specifically for the case of split display/render SoCs.
+Let's say that we have the following devices in a SoC:
+
+drmDevice A: card0
+drmDevice B: card1 + renderD128
+
+If the client decides to create a GBM device with drmDevice A, in EGL we
+are not able to get the render node from it. But we know that when Mesa
+loads the driver, it internally uses KMSRO to find out that the render
+node to use is renderD128. So we need to keep track of this information
+in EGL in order to be able to advertise the render node to
+EGL_EXT_device_drm_render_node.
+
+Signed-off-by: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Reviewed-by: Simon Ser <contact@emersion.fr>
+---
+ src/gallium/auxiliary/util/u_screen.c            | 3 +++
+ src/gallium/drivers/etnaviv/etnaviv_screen.c     | 2 ++
+ src/gallium/drivers/freedreno/freedreno_screen.c | 2 ++
+ src/gallium/drivers/lima/lima_screen.c           | 5 +++++
+ src/gallium/drivers/panfrost/pan_screen.c        | 3 +++
+ src/gallium/drivers/v3d/v3d_screen.c             | 3 +++
+ src/gallium/drivers/vc4/vc4_screen.c             | 3 +++
+ src/gallium/include/pipe/p_defines.h             | 1 +
+ 8 files changed, 22 insertions(+)
+
+diff --git a/src/gallium/auxiliary/util/u_screen.c b/src/gallium/auxiliary/util/u_screen.c
+index 8c519ba4e5aa..a1597b657a92 100644
+--- a/src/gallium/auxiliary/util/u_screen.c
++++ b/src/gallium/auxiliary/util/u_screen.c
+@@ -473,6 +473,9 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
+    case PIPE_CAP_EMULATE_NONFIXED_PRIMITIVE_RESTART:
+       return 0;
+ 
++   case PIPE_CAP_DRM_RENDER_NODE_FD:
++      return -1;
++
+    default:
+       unreachable("bad PIPE_CAP_*");
+    }
+diff --git a/src/gallium/drivers/etnaviv/etnaviv_screen.c b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+index b4d338c27d65..41f30697212d 100644
+--- a/src/gallium/drivers/etnaviv/etnaviv_screen.c
++++ b/src/gallium/drivers/etnaviv/etnaviv_screen.c
+@@ -236,6 +236,8 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+    /* Queries. */
+    case PIPE_CAP_OCCLUSION_QUERY:
+       return VIV_FEATURE(screen, chipMinorFeatures1, HALTI0);
++   case PIPE_CAP_DRM_RENDER_NODE_FD:
++      return screen->ro ? screen->ro->gpu_fd : etna_device_fd(screen->dev);
+ 
+    /* Preferences */
+    case PIPE_CAP_PREFER_BLIT_BASED_TEXTURE_TRANSFER:
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 7b5729bc3d9d..7556d9b579e3 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -526,6 +526,8 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+       return is_a6xx(screen);
+    case PIPE_CAP_TWO_SIDED_COLOR:
+       return 0;
++   case PIPE_CAP_DRM_RENDER_NODE_FD:
++      return screen->ro ? screen->ro->gpu_fd : fd_device_fd(screen->dev);
+    default:
+       return u_pipe_screen_get_param_defaults(pscreen, param);
+    }
+diff --git a/src/gallium/drivers/lima/lima_screen.c b/src/gallium/drivers/lima/lima_screen.c
+index 9c52f30de7d1..5a93c1a6db66 100644
+--- a/src/gallium/drivers/lima/lima_screen.c
++++ b/src/gallium/drivers/lima/lima_screen.c
+@@ -96,6 +96,8 @@ lima_screen_get_device_vendor(struct pipe_screen *pscreen)
+ static int
+ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+ {
++   struct lima_screen *screen = lima_screen(pscreen);
++
+    switch (param) {
+    case PIPE_CAP_NPOT_TEXTURES:
+    case PIPE_CAP_BLEND_EQUATION_SEPARATE:
+@@ -160,6 +162,9 @@ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+    case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
+       return 1;
+ 
++   case PIPE_CAP_DRM_RENDER_NODE_FD:
++      return screen->ro ? screen->ro->gpu_fd : screen->fd;
++
+    default:
+       return u_pipe_screen_get_param_defaults(pscreen, param);
+    }
+diff --git a/src/gallium/drivers/panfrost/pan_screen.c b/src/gallium/drivers/panfrost/pan_screen.c
+index 46cd97bbf138..a9ed37c70c1e 100644
+--- a/src/gallium/drivers/panfrost/pan_screen.c
++++ b/src/gallium/drivers/panfrost/pan_screen.c
+@@ -320,6 +320,9 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
+                 return modes;
+         }
+ 
++        case PIPE_CAP_DRM_RENDER_NODE_FD:
++                return dev->ro ? dev->ro->gpu_fd : dev->fd;
++
+         default:
+                 return u_pipe_screen_get_param_defaults(screen, param);
+         }
+diff --git a/src/gallium/drivers/v3d/v3d_screen.c b/src/gallium/drivers/v3d/v3d_screen.c
+index a3abf5bca8ce..63a259a3ce03 100644
+--- a/src/gallium/drivers/v3d/v3d_screen.c
++++ b/src/gallium/drivers/v3d/v3d_screen.c
+@@ -282,6 +282,9 @@ v3d_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+         case PIPE_CAP_SUPPORTED_PRIM_MODES_WITH_RESTART:
+                 return screen->prim_types;
+ 
++        case PIPE_CAP_DRM_RENDER_NODE_FD:
++                return screen->ro ? screen->ro->gpu_fd : screen->fd;
++
+         default:
+                 return u_pipe_screen_get_param_defaults(pscreen, param);
+         }
+diff --git a/src/gallium/drivers/vc4/vc4_screen.c b/src/gallium/drivers/vc4/vc4_screen.c
+index 40d49cc6b0c4..f81c31c28b6a 100644
+--- a/src/gallium/drivers/vc4/vc4_screen.c
++++ b/src/gallium/drivers/vc4/vc4_screen.c
+@@ -207,6 +207,9 @@ vc4_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+         case PIPE_CAP_SUPPORTED_PRIM_MODES:
+                 return screen->prim_types;
+ 
++        case PIPE_CAP_DRM_RENDER_NODE_FD:
++                return screen->ro ? screen->ro->gpu_fd : screen->fd;
++
+         default:
+                 return u_pipe_screen_get_param_defaults(pscreen, param);
+         }
+diff --git a/src/gallium/include/pipe/p_defines.h b/src/gallium/include/pipe/p_defines.h
+index 908b74e85096..e96c6bd52bbe 100644
+--- a/src/gallium/include/pipe/p_defines.h
++++ b/src/gallium/include/pipe/p_defines.h
+@@ -993,6 +993,7 @@ enum pipe_cap
+    PIPE_CAP_QUERY_SPARSE_TEXTURE_RESIDENCY,
+    PIPE_CAP_CLAMP_SPARSE_TEXTURE_LOD,
+    PIPE_CAP_ALLOW_DRAW_OUT_OF_ORDER,
++   PIPE_CAP_DRM_RENDER_NODE_FD,
+ 
+    PIPE_CAP_LAST,
+    /* XXX do not add caps after PIPE_CAP_LAST! */
+-- 
+GitLab
+
+
+From 2c185382f9b08103393214f702ee92f32c3445b5 Mon Sep 17 00:00:00 2001
+From: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Date: Wed, 8 Sep 2021 14:27:34 -0300
+Subject: [PATCH 2/6] dri: add __DRI2_RENDERER_QUERY_RENDER_NODE_FD
+
+In commit "gallium: add PIPE_CAP_DRM_RENDER_NODE_FD" we've added support
+to query the GPU fd from the driver. Now we add support to expose this
+to EGL using the new renderer driver extension
+__DRI2_RENDERER_QUERY_RENDER_NODE_FD.
+
+Signed-off-by: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Reviewed-by: Simon Ser <contact@emersion.fr>
+---
+ include/GL/internal/dri_interface.h            | 2 ++
+ src/gallium/frontends/dri/dri_query_renderer.c | 9 +++++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/include/GL/internal/dri_interface.h b/include/GL/internal/dri_interface.h
+index 6f436b00e90d..cea94cfecb8a 100644
+--- a/include/GL/internal/dri_interface.h
++++ b/include/GL/internal/dri_interface.h
+@@ -1992,6 +1992,8 @@ typedef struct __DRIDriverVtableExtensionRec {
+ 
+ #define __DRI2_RENDERER_HAS_PROTECTED_CONTENT                 0x000e
+ 
++#define __DRI2_RENDERER_QUERY_RENDER_NODE_FD                  0x000f
++
+ typedef struct __DRI2rendererQueryExtensionRec __DRI2rendererQueryExtension;
+ struct __DRI2rendererQueryExtensionRec {
+    __DRIextension base;
+diff --git a/src/gallium/frontends/dri/dri_query_renderer.c b/src/gallium/frontends/dri/dri_query_renderer.c
+index d9d2984bd64f..6af57447ec5a 100644
+--- a/src/gallium/frontends/dri/dri_query_renderer.c
++++ b/src/gallium/frontends/dri/dri_query_renderer.c
+@@ -74,6 +74,15 @@ dri2_query_renderer_integer(__DRIscreen *_screen, int param,
+       if (!value[0])
+          return -1;
+       return 0;
++   case __DRI2_RENDERER_QUERY_RENDER_NODE_FD: {
++      int render_node_fd =
++         screen->base.screen->get_param(screen->base.screen,
++                                        PIPE_CAP_DRM_RENDER_NODE_FD);
++      if (render_node_fd < 0)
++         return -1;
++      value[0] = render_node_fd;
++      return 0;
++   }
+    default:
+       return driQueryRendererIntegerCommon(_screen, param, value);
+    }
+-- 
+GitLab
+
+
+From f146f561c5ae4bcb0b86dee6943d53cb1eec936e Mon Sep 17 00:00:00 2001
+From: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Date: Fri, 1 Oct 2021 12:26:09 -0300
+Subject: [PATCH 3/6] dri: add drm_render_fd to struct dri2_egl_display
+
+From commit "dri: add __DRI2_RENDERER_QUERY_RENDER_NODE_FD" on, we can
+query the DRM render node fd from the driver. Now we add a field in
+struct dri2_egl_display to keep the result of this query, as in the next
+commits we're going to use it in DRI2 platform implementations.
+
+Signed-off-by: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Reviewed-by: Simon Ser <contact@emersion.fr>
+---
+ src/egl/drivers/dri2/egl_dri2.c | 19 +++++++++++++++++++
+ src/egl/drivers/dri2/egl_dri2.h |  4 ++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/src/egl/drivers/dri2/egl_dri2.c b/src/egl/drivers/dri2/egl_dri2.c
+index d687533168b5..31f7e4e1dd04 100644
+--- a/src/egl/drivers/dri2/egl_dri2.c
++++ b/src/egl/drivers/dri2/egl_dri2.c
+@@ -616,6 +616,14 @@ dri2_add_config(_EGLDisplay *disp, const __DRIconfig *dri_config, int id,
+    return conf;
+ }
+ 
++int
++dri2_get_drm_render_fd(_EGLDisplay *disp)
++{
++   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
++
++   return dri2_dpy->drm_render_fd >= 0 ? dri2_dpy->drm_render_fd : dri2_dpy->fd;
++}
++
+ EGLBoolean
+ dri2_add_pbuffer_configs_for_visuals(_EGLDisplay *disp)
+ {
+@@ -930,6 +938,17 @@ dri2_setup_screen(_EGLDisplay *disp)
+        disp->Extensions.MESA_query_driver = EGL_TRUE;
+    }
+ 
++   /* Report back to EGL the GPU fd */
++   unsigned int drm_render_fd;
++   int ret =
++      dri2_dpy->rendererQuery->queryInteger(dri2_dpy->dri_screen,
++                                            __DRI2_RENDERER_QUERY_RENDER_NODE_FD,
++                                            &drm_render_fd);
++   if (ret < 0)
++      dri2_dpy->drm_render_fd = -1;
++   else
++      dri2_dpy->drm_render_fd = drm_render_fd;
++
+    /* Report back to EGL the bitmask of priorities supported */
+    disp->Extensions.IMG_context_priority =
+       dri2_renderer_query_integer(dri2_dpy,
+diff --git a/src/egl/drivers/dri2/egl_dri2.h b/src/egl/drivers/dri2/egl_dri2.h
+index 1f1c338cdcc4..dda69c3007cc 100644
+--- a/src/egl/drivers/dri2/egl_dri2.h
++++ b/src/egl/drivers/dri2/egl_dri2.h
+@@ -237,6 +237,7 @@ struct dri2_egl_display
+    const __DRIconfigOptionsExtension *configOptions;
+    const __DRImutableRenderBufferDriverExtension *mutable_render_buffer;
+    int fd;
++   int drm_render_fd;
+ 
+    /* dri2_initialize/dri2_terminate increment/decrement this count, so does
+     * dri2_make_current (tracks if there are active contexts/surfaces). */
+@@ -440,6 +441,9 @@ dri2_get_render_type_float(const __DRIcoreExtension *core,
+                            const __DRIconfig *config,
+                            bool *is_float);
+ 
++int
++dri2_get_drm_render_fd(_EGLDisplay *disp);
++
+ unsigned int
+ dri2_image_format_for_pbuffer_config(struct dri2_egl_display *dri2_dpy,
+                                      const __DRIconfig *config);
+-- 
+GitLab
+
+
+From e24bf2af08394baa4f86e4cbd9fe5785cda44f41 Mon Sep 17 00:00:00 2001
+From: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Date: Fri, 17 Sep 2021 13:33:32 -0300
+Subject: [PATCH 4/6] dri: call _eglAddDevice() only after setting up the
+ display
+
+In the next commit we'll need dri2_setup_screen() to be called before
+creating or looking for the EGLDevice's with _eglAddDevice(). The plan
+is to pass dri2_dpy->drm_render_fd (a new field that we are going to
+add) to _eglAddDevice(), but we have this field set only after calling
+dri2_setup_screen(). This drm_render_fd will be used to create or look
+for EGLDevice's, as we are going to stop creating EGLDevice's for DRM
+devices that do not have a render node.
+
+So, for each platform (except platform_device and platform_surfaceless),
+call _eglAddDevice() only after setting up the display.
+
+In the case of platform_device we don't have to change anything, as we
+receive the EGLDevice from the client and so we don't have to create or
+look for an EGLDevice. And in the case of platform_surfaceless we also
+don't need to change anything. It queries all the DRM devices with
+drmGetDevices2() and calls _eglAddDevice() for each of them, until it
+returns an EGLDevice. So both these platforms don't need
+dri2_dpy->drm_render_fd in order to get an EGLDevice.
+
+Signed-off-by: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+---
+ src/egl/drivers/dri2/platform_android.c | 15 ++++-----
+ src/egl/drivers/dri2/platform_drm.c     | 15 ++++-----
+ src/egl/drivers/dri2/platform_wayland.c | 29 ++++++++--------
+ src/egl/drivers/dri2/platform_x11.c     | 45 ++++++++++++-------------
+ 4 files changed, 49 insertions(+), 55 deletions(-)
+
+diff --git a/src/egl/drivers/dri2/platform_android.c b/src/egl/drivers/dri2/platform_android.c
+index 36cce501f412..0dc09167b194 100644
+--- a/src/egl/drivers/dri2/platform_android.c
++++ b/src/egl/drivers/dri2/platform_android.c
+@@ -1692,14 +1692,6 @@ dri2_initialize_android(_EGLDisplay *disp)
+       goto cleanup;
+    }
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
+-   if (!dev) {
+-      err = "DRI2: failed to find EGLDevice";
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+-
+    if (!dri2_setup_extensions(disp)) {
+       err = "DRI2: failed to setup extensions";
+       goto cleanup;
+@@ -1707,6 +1699,13 @@ dri2_initialize_android(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, false);
++   if (!dev) {
++      err = "DRI2: failed to find EGLDevice";
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    /* We set the maximum swap interval as 1 for Android platform, since it is
+     * the maximum value supported by Android according to the value of
+     * ANativeWindow::maxSwapInterval.
+diff --git a/src/egl/drivers/dri2/platform_drm.c b/src/egl/drivers/dri2/platform_drm.c
+index 6aada724a54a..b8403e038db3 100644
+--- a/src/egl/drivers/dri2/platform_drm.c
++++ b/src/egl/drivers/dri2/platform_drm.c
+@@ -720,14 +720,6 @@ dri2_initialize_drm(_EGLDisplay *disp)
+       goto cleanup;
+    }
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, dri2_dpy->gbm_dri->software);
+-   if (!dev) {
+-      err = "DRI2: failed to find EGLDevice";
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+-
+    dri2_dpy->driver_name = strdup(dri2_dpy->gbm_dri->driver_name);
+    dri2_dpy->is_render_node = drmGetNodeTypeFromFd(dri2_dpy->fd) == DRM_NODE_RENDER;
+ 
+@@ -774,6 +766,13 @@ dri2_initialize_drm(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, dri2_dpy->gbm_dri->software);
++   if (!dev) {
++      err = "DRI2: failed to find EGLDevice";
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    if (!drm_add_configs_for_visuals(disp)) {
+       err = "DRI2: failed to add configs";
+       goto cleanup;
+diff --git a/src/egl/drivers/dri2/platform_wayland.c b/src/egl/drivers/dri2/platform_wayland.c
+index cfff0ade90e5..7ca75689d761 100644
+--- a/src/egl/drivers/dri2/platform_wayland.c
++++ b/src/egl/drivers/dri2/platform_wayland.c
+@@ -1521,13 +1521,6 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
+ 
+    dri2_dpy->fd = loader_get_user_preferred_fd(dri2_dpy->fd,
+                                                &dri2_dpy->is_different_gpu);
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
+-   if (!dev) {
+-      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+ 
+    if (dri2_dpy->is_different_gpu) {
+       free(dri2_dpy->device_name);
+@@ -1575,6 +1568,13 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, false);
++   if (!dev) {
++      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    dri2_wl_setup_swap_interval(disp);
+ 
+    /* To use Prime, we must have _DRI_IMAGE v7 at least.
+@@ -2027,14 +2027,6 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
+       dri2_dpy->wl_dpy = disp->PlatformDisplay;
+    }
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, true);
+-   if (!dev) {
+-      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+-
+    dri2_dpy->wl_queue = wl_display_create_queue(dri2_dpy->wl_dpy);
+ 
+    dri2_dpy->wl_dpy_wrapper = wl_proxy_create_wrapper(dri2_dpy->wl_dpy);
+@@ -2072,6 +2064,13 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, true);
++   if (!dev) {
++      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    dri2_wl_setup_swap_interval(disp);
+ 
+    if (!dri2_wl_add_configs_for_visuals(disp)) {
+diff --git a/src/egl/drivers/dri2/platform_x11.c b/src/egl/drivers/dri2/platform_x11.c
+index 5ffdf1321845..bf414dfaa66b 100644
+--- a/src/egl/drivers/dri2/platform_x11.c
++++ b/src/egl/drivers/dri2/platform_x11.c
+@@ -1280,14 +1280,6 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
+    if (!dri2_get_xcb_connection(disp, dri2_dpy))
+       goto cleanup;
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, true);
+-   if (!dev) {
+-      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+-
+    /*
+     * Every hardware driver_name is set using strdup. Doing the same in
+     * here will allow is to simply free the memory at dri2_terminate().
+@@ -1306,6 +1298,13 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, true);
++   if (!dev) {
++      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    if (!dri2_x11_add_configs_for_visuals(dri2_dpy, disp, true))
+       goto cleanup;
+ 
+@@ -1370,14 +1369,6 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
+    if (!dri3_x11_connect(dri2_dpy))
+       goto cleanup;
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
+-   if (!dev) {
+-      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+-
+    if (!dri2_load_driver_dri3(disp))
+       goto cleanup;
+ 
+@@ -1394,6 +1385,13 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, false);
++   if (!dev) {
++      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    dri2_x11_setup_swap_interval(disp);
+ 
+    if (!dri2_dpy->is_different_gpu)
+@@ -1478,14 +1476,6 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
+    if (!dri2_x11_connect(dri2_dpy))
+       goto cleanup;
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
+-   if (!dev) {
+-      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+-      goto cleanup;
+-   }
+-
+-   disp->Device = dev;
+-
+    if (!dri2_load_driver(disp))
+       goto cleanup;
+ 
+@@ -1505,6 +1495,13 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
++   dev = _eglAddDevice(dri2_dpy->fd, false);
++   if (!dev) {
++      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
++      goto cleanup;
++   }
++   disp->Device = dev;
++
+    dri2_x11_setup_swap_interval(disp);
+ 
+    disp->Extensions.KHR_image_pixmap = EGL_TRUE;
+-- 
+GitLab
+
+
+From 2e028da2fb4dba7f81c0132b17228657c81ed872 Mon Sep 17 00:00:00 2001
+From: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Date: Fri, 1 Oct 2021 16:38:22 -0300
+Subject: [PATCH 5/6] egl: do not create EGLDevice for devices that do not have
+ render node
+
+From now on, we don't create EGLDevice for DRM devices that do not have
+a render node.
+
+In the case of split display/render SoCs, EGLDevice's are only created
+for the render-only device. If a client try to initialize EGL using the
+display-only device, it will borrow and use the EGLDevice of the
+corresponding render-only device.
+
+In these cases, KMSRO magically finds the render node under the hood,
+and so we use this information to get the EGLDevice that corresponds to
+the render-only device.
+
+With this change we'll be able to support EGL_EXT_device_drm_render_node
+for split display/render SoCs, what we do in the following commit.
+
+Signed-off-by: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+---
+ src/egl/drivers/dri2/platform_android.c |  2 +-
+ src/egl/drivers/dri2/platform_device.c  | 23 -----------------------
+ src/egl/drivers/dri2/platform_drm.c     |  2 +-
+ src/egl/drivers/dri2/platform_wayland.c |  4 ++--
+ src/egl/drivers/dri2/platform_x11.c     |  6 +++---
+ src/egl/main/egldevice.c                | 13 ++++++++++---
+ 6 files changed, 17 insertions(+), 33 deletions(-)
+
+diff --git a/src/egl/drivers/dri2/platform_android.c b/src/egl/drivers/dri2/platform_android.c
+index 0dc09167b194..772b8970d83f 100644
+--- a/src/egl/drivers/dri2/platform_android.c
++++ b/src/egl/drivers/dri2/platform_android.c
+@@ -1699,7 +1699,7 @@ dri2_initialize_android(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), false);
+    if (!dev) {
+       err = "DRI2: failed to find EGLDevice";
+       goto cleanup;
+diff --git a/src/egl/drivers/dri2/platform_device.c b/src/egl/drivers/dri2/platform_device.c
+index 3d979e982a5c..eab68b8b9c80 100644
+--- a/src/egl/drivers/dri2/platform_device.c
++++ b/src/egl/drivers/dri2/platform_device.c
+@@ -217,29 +217,6 @@ static int
+ device_get_fd(_EGLDisplay *disp, _EGLDevice *dev)
+ {
+ #ifdef HAVE_LIBDRM
+-   int fd = disp->Options.fd;
+-   /* The fcntl() code in _eglGetDeviceDisplay() ensures that valid fd >= 3,
+-    * and invalid one is 0.
+-    */
+-   if (fd) {
+-      /* According to the spec - if the FD does not match the EGLDevice
+-       * behaviour is undefined.
+-       *
+-       * Add a trivial sanity check since it doesn't cost us anything.
+-       */
+-      if (dev != _eglAddDevice(fd, false))
+-         return -1;
+-
+-      /* No EGL_EXT_output* extensions are supported, hence no master perms
+-       * are needed. Get the render one - otherwise drivers might error out.
+-       */
+-      char *node = drmGetRenderDeviceNameFromFd(fd);
+-
+-      /* Don't close the internal fd, get render node one based on it. */
+-      fd = loader_open_device(node);
+-      free(node);
+-      return fd;
+-   }
+    const char *node = _eglGetDRMDeviceRenderNode(dev);
+    return loader_open_device(node);
+ #else
+diff --git a/src/egl/drivers/dri2/platform_drm.c b/src/egl/drivers/dri2/platform_drm.c
+index b8403e038db3..59fbb807935b 100644
+--- a/src/egl/drivers/dri2/platform_drm.c
++++ b/src/egl/drivers/dri2/platform_drm.c
+@@ -766,7 +766,7 @@ dri2_initialize_drm(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, dri2_dpy->gbm_dri->software);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), dri2_dpy->gbm_dri->software);
+    if (!dev) {
+       err = "DRI2: failed to find EGLDevice";
+       goto cleanup;
+diff --git a/src/egl/drivers/dri2/platform_wayland.c b/src/egl/drivers/dri2/platform_wayland.c
+index 7ca75689d761..6ae75caf9816 100644
+--- a/src/egl/drivers/dri2/platform_wayland.c
++++ b/src/egl/drivers/dri2/platform_wayland.c
+@@ -1568,7 +1568,7 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), false);
+    if (!dev) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+       goto cleanup;
+@@ -2064,7 +2064,7 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, true);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), true);
+    if (!dev) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+       goto cleanup;
+diff --git a/src/egl/drivers/dri2/platform_x11.c b/src/egl/drivers/dri2/platform_x11.c
+index bf414dfaa66b..4c4fa9dc6a51 100644
+--- a/src/egl/drivers/dri2/platform_x11.c
++++ b/src/egl/drivers/dri2/platform_x11.c
+@@ -1298,7 +1298,7 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, true);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), true);
+    if (!dev) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+       goto cleanup;
+@@ -1385,7 +1385,7 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), false);
+    if (!dev) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+       goto cleanup;
+@@ -1495,7 +1495,7 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
+ 
+    dri2_setup_screen(disp);
+ 
+-   dev = _eglAddDevice(dri2_dpy->fd, false);
++   dev = _eglAddDevice(dri2_get_drm_render_fd(disp), false);
+    if (!dev) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
+       goto cleanup;
+diff --git a/src/egl/main/egldevice.c b/src/egl/main/egldevice.c
+index a8ae1288f3d4..0738ca59e686 100644
+--- a/src/egl/main/egldevice.c
++++ b/src/egl/main/egldevice.c
+@@ -113,9 +113,12 @@ _eglAddDRMDevice(drmDevicePtr device, _EGLDevice **out_dev)
+ {
+    _EGLDevice *dev;
+ 
+-   if ((device->available_nodes & (1 << DRM_NODE_PRIMARY |
+-                                   1 << DRM_NODE_RENDER)) == 0)
++   /* we don't add devices that don't have render node */
++   if ((device->available_nodes & (1 << DRM_NODE_RENDER)) == 0) {
++      if (out_dev)
++         *out_dev = NULL;
+       return -1;
++   }
+ 
+    dev = _eglGlobal.DeviceList;
+ 
+@@ -160,6 +163,9 @@ _eglAddDRMDevice(drmDevicePtr device, _EGLDevice **out_dev)
+ #endif
+ 
+ /* Adds a device in DeviceList, if needed for the given fd.
++ *
++ * As _eglAddDRMDevice() only creates _EGLDevice's for devices that have render
++ * node, if fd corresponds to a primary node this function returns NULL.
+  *
+  * If a software device, the fd is ignored.
+  */
+@@ -185,7 +191,8 @@ _eglAddDevice(int fd, bool software)
+       goto out;
+    }
+ 
+-   /* Device is not added - error or already present */
++   /* Device is not added - error (dev is set to NULL in this case) or already
++    * present (dev now points to this device). */
+    if (_eglAddDRMDevice(device, &dev) != 0)
+       drmFreeDevice(&device);
+ #else
+-- 
+GitLab
+
+
+From e8f6b810f7126cb81f541f5bcc08747a24b8238e Mon Sep 17 00:00:00 2001
+From: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Date: Mon, 20 Sep 2021 15:28:08 -0300
+Subject: [PATCH 6/6] egl: add support for EGL_EXT_device_drm_render_node in
+ the case of split display/render SoCs
+
+Until now, EGL_EXT_device_drm_render_node was not supported for the case
+of split render/display SoCs. This adds support for this case.
+
+Signed-off-by: Leandro Ribeiro <leandro.ribeiro@collabora.com>
+Reviewed-by: Simon Ser <contact@emersion.fr>
+---
+ src/egl/drivers/dri2/platform_device.c |  2 +-
+ src/egl/main/egldevice.c               | 34 ++++++++------------------
+ src/egl/main/egldevice.h               |  3 ---
+ 3 files changed, 11 insertions(+), 28 deletions(-)
+
+diff --git a/src/egl/drivers/dri2/platform_device.c b/src/egl/drivers/dri2/platform_device.c
+index eab68b8b9c80..235b903f880a 100644
+--- a/src/egl/drivers/dri2/platform_device.c
++++ b/src/egl/drivers/dri2/platform_device.c
+@@ -217,7 +217,7 @@ static int
+ device_get_fd(_EGLDisplay *disp, _EGLDevice *dev)
+ {
+ #ifdef HAVE_LIBDRM
+-   const char *node = _eglGetDRMDeviceRenderNode(dev);
++   const char *node = _eglQueryDeviceStringEXT(dev, EGL_DRM_RENDER_NODE_FILE_EXT);
+    return loader_open_device(node);
+ #else
+    _eglLog(_EGL_FATAL, "Driver bug: Built without libdrm, yet using a HW device");
+diff --git a/src/egl/main/egldevice.c b/src/egl/main/egldevice.c
+index 0738ca59e686..7d9a22049085 100644
+--- a/src/egl/main/egldevice.c
++++ b/src/egl/main/egldevice.c
+@@ -145,16 +145,11 @@ _eglAddDRMDevice(drmDevicePtr device, _EGLDevice **out_dev)
+    }
+ 
+    dev = dev->Next;
+-   dev->extensions = "EGL_EXT_device_drm";
++   dev->extensions = "EGL_EXT_device_drm EGL_EXT_device_drm_render_node";
+    dev->EXT_device_drm = EGL_TRUE;
++   dev->EXT_device_drm_render_node = EGL_TRUE;
+    dev->device = device;
+ 
+-   /* TODO: EGL_EXT_device_drm_render_node support for kmsro + renderonly */
+-   if (device->available_nodes & (1 << DRM_NODE_RENDER)) {
+-      dev->extensions = "EGL_EXT_device_drm EGL_EXT_device_drm_render_node";
+-      dev->EXT_device_drm_render_node = EGL_TRUE;
+-   }
+-
+    if (out_dev)
+       *out_dev = dev;
+ 
+@@ -221,22 +216,6 @@ _eglDeviceSupports(_EGLDevice *dev, _EGLDeviceExtension ext)
+    };
+ }
+ 
+-/* Ideally we'll have an extension which passes the render node,
+- * instead of the card one + magic.
+- *
+- * Then we can move this in _eglQueryDeviceStringEXT below. Until then
+- * keep it separate.
+- */
+-const char *
+-_eglGetDRMDeviceRenderNode(_EGLDevice *dev)
+-{
+-#ifdef HAVE_LIBDRM
+-   return dev->device->nodes[DRM_NODE_RENDER];
+-#else
+-   return NULL;
+-#endif
+-}
+-
+ EGLBoolean
+ _eglQueryDeviceAttribEXT(_EGLDevice *dev, EGLint attribute,
+                          EGLAttrib *value)
+@@ -270,7 +249,14 @@ _eglQueryDeviceStringEXT(_EGLDevice *dev, EGLint name)
+       if (!_eglDeviceSupports(dev, _EGL_DEVICE_DRM_RENDER_NODE))
+          break;
+ #ifdef HAVE_LIBDRM
+-      return dev->device ? dev->device->nodes[DRM_NODE_RENDER] : NULL;
++      /* When EGL device represents the llvmpipe software render, no render
++       * node is exposed. */
++      if (_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE))
++         return NULL;
++
++      /* We create EGLDevice only for devices that expose render node */
++      assert(dev->device->available_nodes & (1 << DRM_NODE_RENDER));
++      return dev->device->nodes[DRM_NODE_RENDER];
+ #else
+       /* Physical devices are only exposed when libdrm is available. */
+       assert(_eglDeviceSupports(dev, _EGL_DEVICE_SOFTWARE));
+diff --git a/src/egl/main/egldevice.h b/src/egl/main/egldevice.h
+index bf2337d4fd41..9a103e19ff24 100644
+--- a/src/egl/main/egldevice.h
++++ b/src/egl/main/egldevice.h
+@@ -69,9 +69,6 @@ typedef enum _egl_device_extension _EGLDeviceExtension;
+ EGLBoolean
+ _eglDeviceSupports(_EGLDevice *dev, _EGLDeviceExtension ext);
+ 
+-const char *
+-_eglGetDRMDeviceRenderNode(_EGLDevice *dev);
+-
+ EGLBoolean
+ _eglQueryDeviceAttribEXT(_EGLDevice *dev, EGLint attribute,
+                          EGLAttrib *value);
+-- 
+GitLab
+

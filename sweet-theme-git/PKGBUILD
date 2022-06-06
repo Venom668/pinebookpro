@@ -1,5 +1,5 @@
 pkgname=sweet-theme-git
-pkgver=r210.d997b6c
+pkgver=r269.6e058fc
 pkgrel=1
 pkgdesc="A dark and modern theme"
 arch=(any)
@@ -27,8 +27,7 @@ sha256sums=('SKIP'
             'SKIP'
             'a6b52fa6a4d701996c324f06b4090df3c6716b5619044098525c08f65a807454'
             '854fb2fe636df02e27816862b51b3c9bf3d04e3bcd50daff2a391503036b3617'
-            '7046a2b821560e1b12344fcc8a96d726ca80fbd90e231187594531183539382d')
-
+            '6ed6040e3a74a51722b5b12fd0acc2a3c868bdd37fe2b460387d1107c9d7c869')
 pkgver() {
   cd "${srcdir}/Sweet"
   
@@ -64,11 +63,9 @@ package() {
 
 
     # Kvantum
-    cd "${srcdir}/Sweet/kde"
-    install -d "${pkgdir}"/usr/share/Kvantum/{Sweet,Sweet-transparent-toolbar}
-    cp kvantum/Sweet-transparent-toolbar.kvconfig "${pkgdir}/usr/share/Kvantum/Sweet-transparent-toolbar"
-    cp kvantum/Sweet.svg "${pkgdir}/usr/share/Kvantum/Sweet-transparent-toolbar/Sweet-transparent-toolbar.svg"
-    mv kvantum/Sweet.* "${pkgdir}/usr/share/Kvantum/Sweet"
+    cd "${srcdir}/Sweet/kde/Kvantum"
+    install -d "${pkgdir}"/usr/share/Kvantum/
+    mv Sweet Sweet-transparent-toolbar "${pkgdir}"/usr/share/Kvantum/
 
 
     # Icons
@@ -120,6 +117,6 @@ package() {
     patch -Np1 < "${srcdir}/plymouth.patch"
     install -d "${pkgdir}/usr/share/plymouth/themes/"
     mv sweet-arch "${pkgdir}/usr/share/plymouth/themes/"
-    mv "${srcdir}/entry.png" "${pkgdir}/usr/share/plymouth/themes/sweet-arch"
-    mv "${srcdir}/dot.png" "${pkgdir}/usr/share/plymouth/themes/sweet-arch"
+    install "${srcdir}/entry.png" "${pkgdir}/usr/share/plymouth/themes/sweet-arch"
+    install "${srcdir}/dot.png" "${pkgdir}/usr/share/plymouth/themes/sweet-arch"
 }
