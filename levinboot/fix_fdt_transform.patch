@@ -1,0 +1,74 @@
+diff --git a/dramstage/commit.c b/dramstage/commit.c
+index 7427e16..f5c79f3 100644
+--- a/dramstage/commit.c
++++ b/dramstage/commit.c
+@@ -147,7 +147,7 @@ _Noreturn void commit(struct payload_desc *payload) {
+ 
+ 	const struct elf_header *header = (const struct elf_header*)payload->elf_start;
+ 	load_elf(header);
+-	if (!transform_fdt((struct fdt_header *)fdt_out_addr, (u32*)payload->kernel_start, (const struct fdt_header *)payload->fdt_start, (const u32*)payload->fdt_end, &fdt_add)) {
++	if (!transform_fdt((struct fdt_header *)fdt_out_addr, (u32*)payload->kernel_start, (const struct fdt_header *)payload->fdt_start, (const char *)payload->fdt_end, &fdt_add)) {
+ 		die("failed to transform FDT\n");
+ 	}
+ 
+diff --git a/dramstage/transform_fdt.c b/dramstage/transform_fdt.c
+index ea3474e..c6d5e5c 100644
+--- a/dramstage/transform_fdt.c
++++ b/dramstage/transform_fdt.c
+@@ -94,7 +94,7 @@ static u32 *insert_memory_node(u32 *out, u32 *out_end, const struct fdt_addendum
+ 	return out;
+ }
+ 
+-bool transform_fdt(struct fdt_header *out_header, u32 *out_end, const struct fdt_header *header, const u32 *in_end, struct fdt_addendum *info) {
++bool transform_fdt(struct fdt_header *out_header, u32 *out_end, const struct fdt_header *header, const char *in_end, struct fdt_addendum *info) {
+ 	// don't pass an output buffer larger than 4GiB
+ 	assert(out_end - (u32*)out_header <= 0x40000000);
+ 
+@@ -104,13 +104,13 @@ bool transform_fdt(struct fdt_header *out_header, u32 *out_end, const struct fdt
+ 	u32 version = be32(header->version), compatible = be32(header->last_compatible_version);
+ 	if (version < compatible || version < 16 || compatible > 17) {return false;}
+ 
+-	size_t words = in_end - (const u32*)header;
++	size_t in_size = in_end - (const char*)header;
+ 	u32 totalsize = be32(header->totalsize);
+-	if (totalsize > words * 4) {return false;}
++	if (totalsize > in_size) {return false;}
+ 	u32 struct_offset = be32(header->struct_offset);
+-	if (struct_offset % 4 != 0 || struct_offset > words * 4) {return false;}
++	if (struct_offset % 4 != 0 || struct_offset > in_size) {return false;}
+ 	const u32 *toks = (const u32*)header + struct_offset / 4;
+-	const u32 *toks_end = in_end;
++	const u32 *toks_end = (const u32 *)header + in_size / 4;
+ 	if (version >= 17) {
+ 		u32 struct_size = be32(header->struct_size);
+ 		if (struct_size % 4 != 0 || struct_size / 4 > toks_end - toks) {return false;}
+diff --git a/include/std/stdio.h b/include/std/stdio.h
+index 93deba4..f820561 100644
+--- a/include/std/stdio.h
++++ b/include/std/stdio.h
+@@ -1,6 +1,7 @@
+ /* SPDX-License-Identifier: CC0-1.0 */
+ #pragma once
+ #include <defs.h>
++#include <stdarg.h>
+ #define FREESTANDING_STDIO
+ 
+ int putchar(int);
+@@ -9,3 +10,4 @@ int PRINTF(1, 2) printf(const char *fmt, ...);
+ typedef void FILE;
+ int fflush(FILE *file);
+ static FILE *const stdout = 0;
++int vprintf(const char *fmt, va_list va);
+diff --git a/rk3399/include/rk3399/dramstage.h b/rk3399/include/rk3399/dramstage.h
+index 937d49f..5b7c1a5 100644
+--- a/rk3399/include/rk3399/dramstage.h
++++ b/rk3399/include/rk3399/dramstage.h
+@@ -44,7 +44,7 @@ struct fdt_addendum {
+ 	u32 boot_cpu;
+ };
+ 
+-_Bool transform_fdt(struct fdt_header *out_header, u32 *out_end, const struct fdt_header *header, const u32 *in_end, struct fdt_addendum *info);
++_Bool transform_fdt(struct fdt_header *out_header, u32 *out_end, const struct fdt_header *header, const char *in_end, struct fdt_addendum *info);
+ _Noreturn void commit(struct payload_desc *payload);
+ 
+ /* this enumeration defines the boot order */
