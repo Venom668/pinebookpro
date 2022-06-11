@@ -27,6 +27,9 @@ prepare() {
 
   patch -Np1 < "${srcdir}/fix_fdt_transform.patch"
 
+  # Serial console 115200 baud
+  sed -i "s/DCONFIG_UART_CLOCK_DIV=1/DCONFIG_UART_CLOCK_DIV=13/" configure.py
+
   mkdir -vp build
   cd build
 
@@ -54,6 +57,6 @@ package() {
   cp levinboot-sd.img levinboot-spi.img "${pkgdir}/boot/levinboot/"
   cp "${srcdir}/trusted-firmware-a-${_tfaver}/build/rk3399/release/bl31/bl31.elf" "${pkgdir}/boot/levinboot/"
   cp "${srcdir}/update-payload.sh" "${pkgdir}/boot/levinboot/"
-  echo "console=ttyS2,115200 root=LABEL=ROOT_ALARM rw rootwait" > "${pkgdir}/boot/levinboot/cmdline.txt"
+  echo "console=ttyS2,115200 root=LABEL=ROOT_ALARM rw rootwait plymouth.ignore-serial-consoles" > "${pkgdir}/boot/levinboot/cmdline.txt"
   install -Dm644 "${srcdir}/levinboot.hook" "${pkgdir}/usr/share/libalpm/hooks/levinboot.hook"
 }

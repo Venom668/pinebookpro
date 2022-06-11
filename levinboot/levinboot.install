@@ -6,9 +6,6 @@ flash_levinboot() {
 }
 
 post_install() {
-  if [ ! -e /boot/levinboot/cmdline.txt ]; then
-  echo "console=ttyS2,115200 root=LABEL=ROOT_ALARM rw rootwait plymouth.ignore-serial-consoles" > /boot/levinboot/cmdline.txt
-  fi
   /boot/levinboot/update-payload.sh
   echo ""
   flash_levinboot
