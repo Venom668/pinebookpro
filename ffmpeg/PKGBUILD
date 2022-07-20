@@ -1,0 +1,178 @@
+# Maintainer: Maxime Gauduin <alucryd@archlinux.org>
+# Contributor: Bartłomiej Piotrowski <bpiotrowski@archlinux.org>
+# Contributor: Ionut Biru <ibiru@archlinux.org>
+# Contributor: Tom Newsom <Jeepster@gmx.co.uk>
+# Contributor: Paul Mattal <paul@archlinux.org>
+
+pkgname=ffmpeg
+pkgver=5.0
+pkgrel=7
+epoch=2
+pkgdesc='Complete solution to record, convert and stream audio and video'
+arch=(aarch64)
+url=https://ffmpeg.org/
+license=(GPL3)
+depends=(
+  alsa-lib
+  bzip2
+  fontconfig
+  fribidi
+  gmp
+  gnutls
+  gsm
+  jack
+  lame
+  libass.so
+  libavc1394
+  libbluray.so
+  libdav1d.so
+  libdrm
+  libfreetype.so
+  libiec61883
+  libmodplug
+  libpulse
+  libraw1394
+  librsvg-2.so
+  libsoxr
+  libssh
+  libtheora
+  libva.so
+  libva-drm.so
+  libva-x11.so
+  libvdpau
+  libvidstab.so
+  libvorbisenc.so
+  libvorbis.so
+  libvpx.so
+  libwebp
+  libx11
+  libx264.so
+  libx265.so
+  libxcb
+  libxext
+  libxml2
+  libxv
+  libxvidcore.so
+  libzimg.so
+  opencore-amr
+  openjpeg2
+  opus
+  sdl2
+  speex
+  srt
+  v4l-utils
+  xz
+  zlib
+)
+makedepends=(
+  amf-headers
+  avisynthplus
+  clang
+  git
+  ladspa
+  nasm
+)
+optdepends=(
+  'avisynthplus: AviSynthPlus support'
+  'ladspa: LADSPA filters'
+)
+provides=(
+  libavcodec.so
+  libavdevice.so
+  libavfilter.so
+  libavformat.so
+  libavutil.so
+  libpostproc.so
+  libswresample.so
+  libswscale.so
+)
+_tag=390d6853d0ef408007feb39c0040682c81c02751
+source=(
+  git+https://git.ffmpeg.org/ffmpeg.git#tag=${_tag}
+  ffmpeg-vmaf2.x.patch
+  add-av_stream_get_first_dts-for-chromium.patch
+  ffmpeg-001-v4l2-request.patch
+)
+b2sums=('SKIP'
+        '65039aac811bfd143359e32720cd6ca64124f1789c1b624bd28a5bd75b37362b2a3b6b402203c4e9d137fb1d00895114f3789df40f8381091d38c98e7876cc8a'
+        '3f2ee7606500fa9444380d138959cd2bccfbba7d34629a17f4f6288c6bde29e931bbe922a7c25d861f057ddd4ba0b095bbd675c1930754746d5dd476b3ccbc13'
+        'de0d253ce3b17d47cce63793b4fd38303765648958c408ae431db0a762e9f484da841edd77aebe4aa7ef966fa5ce5b372c25a76f5d52d2e0538c346c8628d2c7')
+
+prepare() {
+  cd ffmpeg
+  patch -Np1 -i ../ffmpeg-vmaf2.x.patch # vmaf 2.x support
+  patch -Np1 -i ../add-av_stream_get_first_dts-for-chromium.patch # https://crbug.com/1251779
+  patch -Np1 -i ../ffmpeg-001-v4l2-request.patch
+}
+
+pkgver() {
+  cd ffmpeg
+  git describe --tags | sed 's/^n//'
+}
+
+build() {
+  cd ffmpeg
+
+  ./configure \
+    --prefix=/usr \
+    --disable-debug \
+    --disable-static \
+    --disable-stripping \
+    --enable-amf \
+    --enable-avisynth \
+    --enable-lto \
+    --enable-fontconfig \
+    --enable-gmp \
+    --enable-gnutls \
+    --enable-gpl \
+    --enable-ladspa \
+    --enable-libass \
+    --enable-libbluray \
+    --enable-libdav1d \
+    --enable-libdrm \
+    --enable-libfreetype \
+    --enable-libfribidi \
+    --enable-libgsm \
+    --enable-libiec61883 \
+    --enable-libjack \
+    --enable-libmodplug \
+    --enable-libmp3lame \
+    --enable-libopencore_amrnb \
+    --enable-libopencore_amrwb \
+    --enable-libopenjpeg \
+    --enable-libopus \
+    --enable-libpulse \
+    --enable-librsvg \
+    --enable-libsoxr \
+    --enable-libspeex \
+    --enable-libsrt \
+    --enable-libssh \
+    --enable-libtheora \
+    --enable-libv4l2 \
+    --enable-libvidstab \
+    --enable-libvorbis \
+    --enable-libvpx \
+    --enable-libwebp \
+    --enable-libx264 \
+    --enable-libx265 \
+    --enable-libxcb \
+    --enable-libxml2 \
+    --enable-libxvid \
+    --enable-libzimg \
+    --enable-shared \
+    --enable-version3 \
+    --enable-v4l2-request \
+    --enable-libudev \
+    --enable-neon
+
+  make
+  make tools/qt-faststart
+  make doc/ff{mpeg,play}.1
+}
+
+package() {
+  make DESTDIR="${pkgdir}" -C ffmpeg install install-man
+  install -Dm 755 ffmpeg/tools/qt-faststart "${pkgdir}"/usr/bin/
+}
+
+# vim: ts=2 sw=2 et:
