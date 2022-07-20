@@ -1,5 +1,5 @@
 pkgname=levinboot
-pkgver=0.8.6
+pkgver=0.8.7
 pkgrel=1
 _tfaver=2.7
 pkgdesc='A bootloader project for the RK3399 SoC.'
@@ -14,18 +14,14 @@ backup=('boot/levinboot/cmdline.txt')
 source=("https://gitlab.com/DeltaGem/levinboot/-/archive/v${pkgver}/levinboot-v${pkgver}.tar.gz"
         "https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git/snapshot/trusted-firmware-a-$_tfaver.tar.gz"
         "levinboot.hook"
-        "update-payload.sh"
-        "fix_fdt_transform.patch")
-sha256sums=('6195dc9c1db2528f88854567937aa258d232c03c3db5f96d13eb66a375cdbfcf'
+        "update-payload.sh")
+sha256sums=('6e26ade0058138fb421d9b40bccb1dbe8d91702ecc138c2a855b36fb3814ce00'
             '53422dc649153838e03820330ba17cb10afe3e330ecde0db11e4d5f1361a33e6'
             '88f1c22f5dac2d3842e5999064dabf6664bc9fbed27126ee3371b9f912bec844'
-            '658cbfc91cc26496ee692bc761e0ab6590c4ccf54c79573e733ad2c18773c8e2'
-            '557225e1dde4f58c0a1fab7fc649f4dc49383f7b05211d9b9a9a1d39e62f94af')
+            '658cbfc91cc26496ee692bc761e0ab6590c4ccf54c79573e733ad2c18773c8e2')
 
 prepare() {
   cd "${srcdir}/levinboot-v${pkgver}"
-
-  patch -Np1 < "${srcdir}/fix_fdt_transform.patch"
 
   # Serial console 115200 baud
   sed -i "s/DCONFIG_UART_CLOCK_DIV=1/DCONFIG_UART_CLOCK_DIV=13/" configure.py
@@ -53,7 +49,7 @@ build() {
 package() {
   cd "${srcdir}/levinboot-v${pkgver}/build"
   mkdir -p "${pkgdir}/boot/levinboot/usb"
-  cp usbstage.bin teststage.bin sramstage.bin memtest.bin dramstage.bin levinboot-usb.bin "${pkgdir}/boot/levinboot/usb/"
+  cp teststage.bin memtest.bin dramstage.bin sramstage-usb.bin levinboot-usb.bin "${pkgdir}/boot/levinboot/usb/"
   cp levinboot-sd.img levinboot-spi.img "${pkgdir}/boot/levinboot/"
   cp "${srcdir}/trusted-firmware-a-${_tfaver}/build/rk3399/release/bl31/bl31.elf" "${pkgdir}/boot/levinboot/"
   cp "${srcdir}/update-payload.sh" "${pkgdir}/boot/levinboot/"
