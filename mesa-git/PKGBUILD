@@ -12,7 +12,7 @@
 
 pkgname=mesa-git
 pkgdesc="an open-source implementation of the OpenGL specification, git version"
-pkgver=22.2.0_devel.154655.6dfaedd607d
+pkgver=22.2.0_devel.156898.2e7ecc02bcf7
 pkgrel=1
 arch=('aarch64')
 makedepends=('git' 'python-mako' 'xorgproto'
@@ -30,7 +30,7 @@ source=('mesa::git+https://gitlab.freedesktop.org/mesa/mesa.git#branch=main'
         '12796.patch')
 sha512sums=('SKIP'
             '25da77914dded10c1f432ebcbf29941124138824ceecaf1367b3deedafaecabc082d463abcfa3d15abff59f177491472b505bcb5ba0c4a51bb6b93b4721a23c2'
-            'f9d130a479aa0e3103b4a0abde5ed0369242fcd584271ad0ba5bf29ccfffd6b2a29f60a26fa1d03f9e0024a8b803c20acbde3b7bc9de2879e125771eb70d700e')
+            '1d9521df781ca977ee6b16cf202718d0c5de1c777c33a0c05f48db3c246dc98547ced1d11659850023146337ccb5d5a4c288ef18a5ff35d8d28ff06d3995c18a')
 
 # NINJAFLAGS is an env var used to pass commandline options to ninja
 # NOTE: It's your responbility to validate the value of $NINJAFLAGS. If unsure, don't set it.
