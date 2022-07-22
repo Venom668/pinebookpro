@@ -20,7 +20,7 @@ source=("https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${pkgver}.tar.xz"
 
         'drm-rockchip-support-gamma-control-on-RK3399.patch')
 sha256sums=('40b74d0942f255da07481710e1083412d06e37e45b8f9d9e34ae856db37b9527'
-            'SKIP'
+            '6296ef535b754b25481d5dea7d31641d72b7c79dcd5472b38c8aaa0b10511230'
             '66644820faa950a5fc59181f5aefcbed6d7ed652b29aee69979a2be2a032025d'
             '452b8d4d71e1565ca91b1bebb280693549222ef51c47ba8964e411b2d461699c'
             '71df1b18a3885b151a3b9d926a91936da2acc90d5e27f1ad326745779cd3759d'
@@ -56,8 +56,8 @@ build() {
 
   #make LSMOD=$HOME/.config/modprobed.db localmodconfig
 
-  make nconfig
-  cp ./.config $HOME/current.config
+  #make nconfig
+  #cp ./.config $HOME/current.config
 
   # build!
   unset LDFLAGS
