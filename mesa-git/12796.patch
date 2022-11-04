@@ -147,9 +147,9 @@ index 908b74e85096..e96c6bd52bbe 100644
 --- a/src/gallium/include/pipe/p_defines.h
 +++ b/src/gallium/include/pipe/p_defines.h
 @@ -993,6 +993,7 @@ enum pipe_cap
-    PIPE_CAP_DITHERING,
-    PIPE_CAP_FBFETCH_ZS,
-    PIPE_CAP_TIMELINE_SEMAPHORE_IMPORT,
+    PIPE_CAP_QUERY_TIMESTAMP_BITS,
+    /** For EGL_EXT_protected_content */
+    PIPE_CAP_DEVICE_PROTECTED_CONTEXT,
 +   PIPE_CAP_DRM_RENDER_NODE_FD,
  
     PIPE_CAP_LAST,
@@ -471,7 +471,7 @@ index 5ffdf1321845..bf414dfaa66b 100644
     /*
      * Every hardware driver_name is set using strdup. Doing the same in
      * here will allow is to simply free the memory at dri2_terminate().
-@@ -1306,6 +1298,13 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
+@@ -1477,6 +1469,13 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
  
     dri2_setup_screen(disp);
  
@@ -482,10 +482,10 @@ index 5ffdf1321845..bf414dfaa66b 100644
 +   }
 +   disp->Device = dev;
 +
-    if (!dri2_x11_add_configs_for_visuals(dri2_dpy, disp, true))
-       goto cleanup;
- 
-@@ -1370,14 +1369,6 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
+    if (disp->Options.Zink) {
+       /* kopper */
+ #ifdef HAVE_WAYLAND_PLATFORM
+@@ -1543,14 +1542,6 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
     if (!dri3_x11_connect(dri2_dpy))
        goto cleanup;
  
@@ -500,7 +500,7 @@ index 5ffdf1321845..bf414dfaa66b 100644
     if (!dri2_load_driver_dri3(disp))
        goto cleanup;
  
-@@ -1394,6 +1385,13 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
+@@ -1567,6 +1558,14 @@ dri2_initialize_x11_dri3(_EGLDisplay *disp)
  
     dri2_setup_screen(disp);
  
@@ -509,12 +509,13 @@ index 5ffdf1321845..bf414dfaa66b 100644
 +      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
 +      goto cleanup;
 +   }
++
 +   disp->Device = dev;
 +
     dri2_x11_setup_swap_interval(disp);
  
     if (!dri2_dpy->is_different_gpu)
-@@ -1478,14 +1476,6 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
+@@ -1652,14 +1651,6 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
     if (!dri2_x11_connect(dri2_dpy))
        goto cleanup;
  
@@ -529,7 +530,7 @@ index 5ffdf1321845..bf414dfaa66b 100644
     if (!dri2_load_driver(disp))
        goto cleanup;
  
-@@ -1505,6 +1495,13 @@ dri2_initialize_x11_dri2(_EGLDisplay *disp)
+@@ -1679,6 +1670,14 @@
  
     dri2_setup_screen(disp);
  
@@ -538,6 +539,7 @@ index 5ffdf1321845..bf414dfaa66b 100644
 +      _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to find EGLDevice");
 +      goto cleanup;
 +   }
++
 +   disp->Device = dev;
 +
     dri2_x11_setup_swap_interval(disp);

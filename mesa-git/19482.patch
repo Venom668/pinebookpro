@@ -1,0 +1,1175 @@
+From b2141415e7a78f6a0ddb6ee6d09d48e9c304e275 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Wed, 2 Nov 2022 13:43:11 -0400
+Subject: [PATCH 01/15] panfrost: Don't copy resources if replaced
+
+If a synchronized transfer_map is going to overwrite an entire resource,
+there's no need to memcpy in the original contents ahead-of-time. This
+memcpy is particularly bad for large buffers where it's copying WC->WC,
+although that could be mitigated with threaded_context's cpu_storage in
+the future if needed.
+
+Prevents a performance regression in glmark2's buffer scenes from the
+next patch, hence the Cc.
+
+Cc: mesa-stable
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_resource.c | 25 ++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index a2992253a2bb..ac171ca13dc9 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -936,6 +936,17 @@ panfrost_store_tiled_images(struct panfrost_transfer *transfer,
+         }
+ }
+ 
++static bool
++panfrost_box_covers_resource(const struct pipe_resource *resource,
++                             const struct pipe_box *box)
++{
++        return resource->last_level == 0 &&
++               resource->width0 == box->width &&
++               resource->height0 == box->height &&
++               resource->depth0 == box->depth &&
++               resource->array_size == 1;
++}
++
+ static void *
+ panfrost_ptr_map(struct pipe_context *pctx,
+                       struct pipe_resource *resource,
+@@ -1005,6 +1016,18 @@ panfrost_ptr_map(struct pipe_context *pctx,
+         if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC))
+                 pandecode_inject_mmap(bo->ptr.gpu, bo->ptr.cpu, bo->size, NULL);
+ 
++        /* Upgrade DISCARD_RANGE to WHOLE_RESOURCE if the whole resource is
++         * being mapped.
++         */
++        if ((usage & PIPE_MAP_DISCARD_RANGE) &&
++            !(usage & PIPE_MAP_UNSYNCHRONIZED) &&
++            !(resource->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
++            panfrost_box_covers_resource(resource, box) &&
++            !(rsrc->image.data.bo->flags & PAN_BO_SHARED)) {
++
++                usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
++        }
++
+         bool create_new_bo = usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+         bool copy_resource = false;
+ 
+@@ -1025,7 +1048,7 @@ panfrost_ptr_map(struct pipe_context *pctx,
+                 panfrost_bo_wait(bo, INT64_MAX, false);
+ 
+                 create_new_bo = true;
+-                copy_resource = true;
++                copy_resource = !panfrost_box_covers_resource(resource, box);
+         }
+ 
+         if (create_new_bo) {
+-- 
+GitLab
+
+
+From d28a043e581fb0245a552db3ee95f71619543879 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 14:42:36 -0400
+Subject: [PATCH 02/15] panfrost: Replace resource shadowing flush
+
+The entire point of resource shadowing is to avoid unnecessary flushing.
+Flushing readers after shadowing is counterproductive. A refresher on
+how resource shadowing is supposed to work:
+
+First, we determine if it's beneficial to shadow resources. If so, we
+create a new backing buffer object. We flush the current writer of the
+resource, if there is one, so the current contents become known to the
+CPU. If we are not discarding the original resource, we then copy the
+existing contents of the buffer to the new shadow buffer on the CPU.
+Finally, we swap the resource's backing buffer for our shadow. Any batch
+that reads the resource will continue to read the old copy of the
+resource, and any future draw calls will see the new copy with the
+change implemented.
+
+Where did we go wrong?
+
+In 988d5aae74d ("panfrost: Flush resources when shadowing"), we started
+flushing all readers. We didn't actually need to flush, we just needed
+to avoid dangling references on the batches reading the old copy of the
+resource. But that's easily enough avoided: just remove the references.
+The batches still hold a reference to the underlying BO, which will be
+freed at the right time regardless.
+
+Originally motivated by glmark2 -bbuffer:update-method=subdata, which
+has some pathological access paterns.
+
+Firefox is a lot faster anecdotally (now scrolling at 60fps in firefox).
+
+But what actually motivated this is an apitrace from Duckstation's GLES
+renderer. With this patch, the in-game portion is improved 3fps to 21fps.
+
+Closes: #4028
+Fixes: 988d5aae74d ("panfrost: Flush resources when shadowing")
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_job.c      | 40 ++++++++++++++++++++-
+ src/gallium/drivers/panfrost/pan_job.h      |  5 +++
+ src/gallium/drivers/panfrost/pan_resource.c | 17 ++++-----
+ 3 files changed, 53 insertions(+), 9 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index 4074ae2cbd71..898ba2a26cba 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -122,7 +122,7 @@ panfrost_batch_cleanup(struct panfrost_context *ctx, struct panfrost_batch *batc
+                 panfrost_bo_unreference(bo);
+         }
+ 
+-        set_foreach_remove(batch->resources, entry) {
++        set_foreach(batch->resources, entry) {
+                 struct panfrost_resource *rsrc = (void *) entry->key;
+ 
+                 if (_mesa_hash_table_search(ctx->writers, rsrc)) {
+@@ -364,6 +364,44 @@ panfrost_batch_write_rsrc(struct panfrost_batch *batch,
+         panfrost_batch_update_access(batch, rsrc, true);
+ }
+ 
++void
++panfrost_resource_swap_bo(struct panfrost_context *ctx,
++                          struct panfrost_resource *rsrc,
++                          struct panfrost_bo *newbo)
++{
++        /* Any batch writing this resource is writing to the old BO, not the
++         * new BO. After swapping the resource's backing BO, there will be no
++         * writers of the updated resource. Existing writers still hold a
++         * reference to the old BO for reference counting.
++         */
++        struct hash_entry *writer = _mesa_hash_table_search(ctx->writers, rsrc);
++        if (writer) {
++                _mesa_hash_table_remove(ctx->writers, writer);
++                rsrc->track.nr_writers--;
++        }
++
++        /* Likewise, any batch reading this resource is reading the old BO, and
++         * after swapping will not be reading this resource.
++         */
++        unsigned i;
++        foreach_batch(ctx, i) {
++                struct panfrost_batch *batch = &ctx->batches.slots[i];
++                struct set_entry *ent = _mesa_set_search(batch->resources, rsrc);
++
++                if (!ent)
++                        continue;
++
++                _mesa_set_remove(batch->resources, ent);
++                rsrc->track.nr_users--;
++        }
++
++        /* Swap the pointers, dropping a reference to the old BO which is no
++         * long referenced from the resource
++         */
++        panfrost_bo_unreference(rsrc->image.data.bo);
++        rsrc->image.data.bo = newbo;
++}
++
+ struct panfrost_bo *
+ panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
+                          uint32_t create_flags, enum pipe_shader_type stage,
+diff --git a/src/gallium/drivers/panfrost/pan_job.h b/src/gallium/drivers/panfrost/pan_job.h
+index b5c5c270ed8b..52eac4e0b17f 100644
+--- a/src/gallium/drivers/panfrost/pan_job.h
++++ b/src/gallium/drivers/panfrost/pan_job.h
+@@ -219,6 +219,11 @@ panfrost_batch_write_rsrc(struct panfrost_batch *batch,
+                           struct panfrost_resource *rsrc,
+                           enum pipe_shader_type stage);
+ 
++void
++panfrost_resource_swap_bo(struct panfrost_context *ctx,
++                          struct panfrost_resource *rsrc,
++                          struct panfrost_bo *newbo);
++
+ struct panfrost_bo *
+ panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
+                          uint32_t create_flags, enum pipe_shader_type stage,
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index ac171ca13dc9..0bb5e975866d 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -1051,6 +1051,14 @@ panfrost_ptr_map(struct pipe_context *pctx,
+                 copy_resource = !panfrost_box_covers_resource(resource, box);
+         }
+ 
++        /* Shadowing with separate stencil may require additional accounting.
++         * Bail in these exotic cases.
++         */
++        if (rsrc->separate_stencil) {
++                create_new_bo = false;
++                copy_resource = false;
++        }
++
+         if (create_new_bo) {
+                 /* Make sure we re-emit any descriptors using this resource */
+                 panfrost_dirty_state_all(ctx);
+@@ -1078,14 +1086,7 @@ panfrost_ptr_map(struct pipe_context *pctx,
+                                 if (copy_resource)
+                                         memcpy(newbo->ptr.cpu, rsrc->image.data.bo->ptr.cpu, bo->size);
+ 
+-                                panfrost_bo_unreference(bo);
+-                                rsrc->image.data.bo = newbo;
+-
+-                                /* Swapping out the BO will invalidate batches
+-                                 * accessing this resource, flush them but do
+-                                 * not wait for them.
+-                                 */
+-                                panfrost_flush_batches_accessing_rsrc(ctx, rsrc, "Resource shadowing");
++                                panfrost_resource_swap_bo(ctx, rsrc, newbo);
+ 
+ 	                        if (!copy_resource &&
+                                     drm_is_afbc(rsrc->image.layout.modifier))
+-- 
+GitLab
+
+
+From 7c61cb5e9b7424b52fc36b8af2069abedb356a24 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Thu, 27 Oct 2022 22:15:24 -0400
+Subject: [PATCH 03/15] pan/mdg: Refuse to schedule CSEL.vector to SMUL
+
+Even if we only mask a single component from the result of CSEL.vector,
+in our IR we treat its semantics as vector which causes trouble with
+when scheduled to a scalar unit.
+
+The problematic bundle looks like this:
+
+   vmul.MOV.i32 R31, TMP0.xxxx, R0.yzww
+   sadd.MAX.i32 TMP0.y, R0.y, #65408
+   smul.CSEL.vector.i32 R0.y, TMP0.y, #127
+
+As the comment in midgard.h illuminates, these CSEL instructions are
+actually operating per-bit, lining up with the all-1's booleans in
+Midgard. The Bifrost analogue is MUX.i32.bit, not CSEL.i32. We should
+probably rename the Midgard instruction to make that clear.
+
+Anyhoo, on the scalar unit, CSEL/MUX operates on the bottom 32-bits of
+its source. That's ok for the usual r31.w case, because that's secretly
+replicating to its nonexistent register, I think? But that doesn't work
+with the CSEL.vector (MUX.vector) form, because the condition it's
+actually muxing on is r31.x, which here is R0.y, not the intended R0.x.
+
+Rather than adding more special cases to the already overcomplicated
+scheduler (for the dubious benefit of avoiding a small shaderdb
+regression), just avoid scheduling CSEL.vector to smul.
+
+With the next patch, fixes:
+
+dEQP-GLES31.functional.draw_buffers_indexed.random.max_required_draw_buffers.1
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/midgard/midgard_ops.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/panfrost/midgard/midgard_ops.c b/src/panfrost/midgard/midgard_ops.c
+index 4e12a25064a5..e45949085990 100644
+--- a/src/panfrost/midgard/midgard_ops.c
++++ b/src/panfrost/midgard/midgard_ops.c
+@@ -113,10 +113,18 @@ struct mir_op_props alu_opcode_props[256] = {
+         [midgard_alu_op_ult]             = {"CMP.lt", UNITS_MOST},
+         [midgard_alu_op_ule]             = {"CMP.le", UNITS_MOST},
+ 
+-        /* csel must run in the second pipeline stage (condition written in first) */
++        /* CSEL (MUX) runs in the second pipeline stage, sourcing its selector
++         * the previous scalar or vector stage as indicated in the opcode. It
++         * muxes individual bits based on the selector, implementing both
++         * bit_select and bcsel (the latter because CMP returns 0/~0 booleans).
++         *
++         * It is legal to schedule (F)CSEL.vector to the scalar unit, but it
++         * isn't usually useful. Our scheduler does not handle that case, so
++         * don't try to and fall over.
++         */
+         [midgard_alu_op_icsel]           = {"CSEL.scalar", UNIT_VADD | UNIT_SMUL},
+-        [midgard_alu_op_icsel_v]         = {"CSEL.vector", UNIT_VADD | UNIT_SMUL}, /* Acts as bitselect() */
+-        [midgard_alu_op_fcsel_v]         = {"FCSEL.vector", UNIT_VADD | UNIT_SMUL},
++        [midgard_alu_op_icsel_v]         = {"CSEL.vector", UNIT_VADD},
++        [midgard_alu_op_fcsel_v]         = {"FCSEL.vector", UNIT_VADD},
+         [midgard_alu_op_fcsel]           = {"FCSEL.scalar", UNIT_VADD | UNIT_SMUL},
+ 
+         [midgard_alu_op_frcp]            = {"FRCP", UNIT_VLUT},
+-- 
+GitLab
+
+
+From 065211bf414c893958cb8ee4d40c62c11ed4b9e2 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Thu, 27 Oct 2022 21:28:34 -0400
+Subject: [PATCH 04/15] pan/mdg: Emulate 8-bit with the 16-bit pipe
+
+We don't care to support i8vec16, we just need a bit of 8-bit support to
+implement format packing/unpacking in blend shaders. We're already doing
+this by using the 16-bit pipe, we just need to commit to it all the way
+-- reporting the correct sizes in max_bitsize_for_alu so the mask
+packing logic works as intended -- and dropping the imov-specific hack
+that was introduced to workaround a similar class of bugs.
+
+With the previous patch, fixes:
+
+   dEQP-GLES31.functional.draw_buffers_indexed.random.max_required_draw_buffers.1
+
+Fixes: 39e4b7279dc ("pan/midg: Fix swizzling on 8-bit sources")
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/ci/panfrost-t860-fails.txt |  4 ----
+ src/panfrost/midgard/midgard_compile.c  |  3 +++
+ src/panfrost/midgard/midgard_emit.c     |  6 ------
+ src/panfrost/midgard/mir.c              | 14 +++++---------
+ 4 files changed, 8 insertions(+), 19 deletions(-)
+
+diff --git a/src/panfrost/ci/panfrost-t860-fails.txt b/src/panfrost/ci/panfrost-t860-fails.txt
+index 8190d9625406..9c1d19c67441 100644
+--- a/src/panfrost/ci/panfrost-t860-fails.txt
++++ b/src/panfrost/ci/panfrost-t860-fails.txt
+@@ -4,11 +4,9 @@ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffer
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.3,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.4,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.5,Fail
+-dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.7,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.8,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.9,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.10,Fail
+-dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.11,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.12,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.13,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.14,Fail
+@@ -17,7 +15,6 @@ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffer
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.17,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.18,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_implementation_draw_buffers.19,Fail
+-dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.1,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.2,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.10,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.11,Fail
+@@ -25,7 +22,6 @@ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.12,F
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.15,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.16,Fail
+ dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.17,Fail
+-dEQP-GLES3.functional.draw_buffers_indexed.random.max_required_draw_buffers.18,Fail
+ dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_mag,Fail
+ dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_mag_reverse_dst_x,Fail
+ dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_mag_reverse_dst_y,Fail
+diff --git a/src/panfrost/midgard/midgard_compile.c b/src/panfrost/midgard/midgard_compile.c
+index 940a98b75e0b..69d88eb4a601 100644
+--- a/src/panfrost/midgard/midgard_compile.c
++++ b/src/panfrost/midgard/midgard_compile.c
+@@ -2650,6 +2650,9 @@ max_bitsize_for_alu(midgard_instruction *ins)
+         unsigned dst_bitsize = nir_alu_type_get_type_size(ins->dest_type);
+         max_bitsize = MAX2(dst_bitsize, max_bitsize);
+ 
++        /* We emulate 8-bit as 16-bit for simplicity of packing */
++        max_bitsize = MAX2(max_bitsize, 16);
++
+         /* We don't have fp16 LUTs, so we'll want to emit code like:
+          *
+          *      vlut.fsinr hr0, hr0
+diff --git a/src/panfrost/midgard/midgard_emit.c b/src/panfrost/midgard/midgard_emit.c
+index 716e434b7bcb..6000fc4577f1 100644
+--- a/src/panfrost/midgard/midgard_emit.c
++++ b/src/panfrost/midgard/midgard_emit.c
+@@ -340,12 +340,6 @@ mir_pack_vector_srcs(midgard_instruction *ins, midgard_vector_alu *alu)
+                 unsigned sz = nir_alu_type_get_type_size(ins->src_types[i]);
+                 assert((sz == base_size) || (sz == base_size / 2));
+ 
+-                /* Promote 8bit moves to 16bit ones so we can support any swizzles. */
+-                if (sz == 8 && base_size == 8 && ins->op == midgard_alu_op_imov) {
+-                        ins->outmod = midgard_outmod_keeplo;
+-                        base_size = 16;
+-                }
+-
+                 midgard_src_expand_mode expand_mode = midgard_src_passthrough;
+                 unsigned swizzle = mir_pack_swizzle(ins->mask, ins->swizzle[i],
+                                                     sz, base_size, channeled,
+diff --git a/src/panfrost/midgard/mir.c b/src/panfrost/midgard/mir.c
+index 5ff9469bcff9..a4ea28fcdc81 100644
+--- a/src/panfrost/midgard/mir.c
++++ b/src/panfrost/midgard/mir.c
+@@ -232,20 +232,16 @@ mir_set_bytemask(midgard_instruction *ins, uint16_t bytemask)
+         ins->mask = mir_from_bytemask(bytemask, type_size);
+ }
+ 
+-/* Checks if we should use an upper destination override, rather than the lower
+- * one in the IR. Returns zero if no, returns the bytes to shift otherwise */
+-
++/*
++ * Checks if we should use an upper destination override, rather than the lower
++ * one in the IR. If yes, returns the bytes to shift by. If no, returns zero
++ * for a lower override and negative for no override.
++ */
+ signed
+ mir_upper_override(midgard_instruction *ins, unsigned inst_size)
+ {
+         unsigned type_size = nir_alu_type_get_type_size(ins->dest_type);
+ 
+-        /* 8bit imovs are promoted to 16bit ones with .sext on the source and
+-         * .keeplo on the destination to accomodate with non-identity swizzles.
+-         */
+-        if (ins->op == midgard_alu_op_imov && type_size == 8)
+-                return 0;
+-
+         /* If the sizes are the same, there's nothing to override */
+         if (type_size == inst_size)
+                 return -1;
+-- 
+GitLab
+
+
+From b0cdf50ad5267561d4438ea4a280850d9d090108 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 15:45:03 -0400
+Subject: [PATCH 05/15] pan/mdg: Fix out-of-order execution
+
+We can go up to 15 instructions out of order (performance fix) but we
+can't go past a branch (bug fix).
+
+Fixes: 30a393f4581 ("pan/mdg: Enable out-of-order execution after texture ops")
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/midgard/midgard.h      |  4 ++--
+ src/panfrost/midgard/midgard_emit.c | 16 ++++++++++------
+ 2 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/src/panfrost/midgard/midgard.h b/src/panfrost/midgard/midgard.h
+index d7715c697cd6..2121dc4790b7 100644
+--- a/src/panfrost/midgard/midgard.h
++++ b/src/panfrost/midgard/midgard.h
+@@ -937,8 +937,8 @@ __attribute__((__packed__))
+          * be any dependency (the blob appears to forbid even accessing other
+          * channels of a given texture register). */
+ 
+-        unsigned out_of_order   : 2;
+-        unsigned unknown4  : 10;
++        unsigned out_of_order   : 4;
++        unsigned unknown4  : 8;
+ 
+         /* In immediate mode, each offset field is an immediate range [0, 7].
+          *
+diff --git a/src/panfrost/midgard/midgard_emit.c b/src/panfrost/midgard/midgard_emit.c
+index 6000fc4577f1..45b23db3f723 100644
+--- a/src/panfrost/midgard/midgard_emit.c
++++ b/src/panfrost/midgard/midgard_emit.c
+@@ -410,10 +410,11 @@ mir_pack_swizzle_tex(midgard_instruction *ins)
+         /* TODO: bias component */
+ }
+ 
+-/* Up to 3 { ALU, LDST } bundles can execute in parallel with a texture op.
++/*
++ * Up to 15 { ALU, LDST } bundles can execute in parallel with a texture op.
+  * Given a texture op, lookahead to see how many such bundles we can flag for
+- * OoO execution */
+-
++ * OoO execution
++ */
+ static bool
+ mir_can_run_ooo(midgard_block *block, midgard_bundle *bundle,
+                 unsigned dependency)
+@@ -426,11 +427,14 @@ mir_can_run_ooo(midgard_block *block, midgard_bundle *bundle,
+         if (!IS_ALU(bundle->tag) && bundle->tag != TAG_LOAD_STORE_4)
+                 return false;
+ 
+-        /* Ensure there is no read-after-write dependency */
+-
+         for (unsigned i = 0; i < bundle->instruction_count; ++i) {
+                 midgard_instruction *ins = bundle->instructions[i];
+ 
++                /* No branches, jumps, or discards */
++                if (ins->compact_branch)
++                        return false;
++
++                /* No read-after-write data dependencies */
+                 mir_foreach_src(ins, s) {
+                         if (ins->src[s] == dependency)
+                                 return false;
+@@ -446,7 +450,7 @@ mir_pack_tex_ooo(midgard_block *block, midgard_bundle *bundle, midgard_instructi
+ {
+         unsigned count = 0;
+ 
+-        for (count = 0; count < 3; ++count) {
++        for (count = 0; count < 15; ++count) {
+                 if (!mir_can_run_ooo(block, bundle + count + 1, ins->dest))
+                         break;
+         }
+-- 
+GitLab
+
+
+From c40e0dc1cde58f108f37689876fb97371e395744 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 15:38:26 -0400
+Subject: [PATCH 06/15] panfrost: Enable AFBC of cube maps
+
+Missed by mistake. This is not the same as 3D AFBC, it's just like a 2D
+array. Noted in a supertuxkart pandecode.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+Cc: mesa-stable
+---
+ src/gallium/drivers/panfrost/pan_resource.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
+index 0bb5e975866d..c436beda9eba 100644
+--- a/src/gallium/drivers/panfrost/pan_resource.c
++++ b/src/gallium/drivers/panfrost/pan_resource.c
+@@ -325,8 +325,10 @@ panfrost_should_afbc(struct panfrost_device *dev,
+ 
+         switch (pres->base.target) {
+         case PIPE_TEXTURE_2D:
+-        case PIPE_TEXTURE_2D_ARRAY:
+         case PIPE_TEXTURE_RECT:
++        case PIPE_TEXTURE_2D_ARRAY:
++        case PIPE_TEXTURE_CUBE:
++        case PIPE_TEXTURE_CUBE_ARRAY:
+                 break;
+ 
+         case PIPE_TEXTURE_3D:
+-- 
+GitLab
+
+
+From cf2ea6c7790ede6a291ad1d4e8e055c125728086 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Thu, 27 Oct 2022 17:31:08 -0400
+Subject: [PATCH 07/15] panfrost: Enable AFBC of sRGB formats
+
+AFBC of sRGB formats should just work. We just need to flip it on and enjoy
+the improved performance.
+
+In particular, this means that RGBA8 UNORM and RGBA8 sRGB UNORM are now
+considered compatible formats for AFBC. That's a bug fix, because
+GALLIUM_HUD use will act like a texture view between sRGB and linear
+views. For FBOs, that will "just" result in a decompression, hurting
+performance. For window system rendering with AFBC, that will cause an
+assertion failure, as we cannot decompress SHARED resources.
+
+Fixes: 789601a189e ("panfrost: Decompress for incompatible AFBC formats")
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/lib/pan_afbc.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/panfrost/lib/pan_afbc.c b/src/panfrost/lib/pan_afbc.c
+index bf655e7a2c29..96c16b7fc8a0 100644
+--- a/src/panfrost/lib/pan_afbc.c
++++ b/src/panfrost/lib/pan_afbc.c
+@@ -74,6 +74,13 @@
+ enum pipe_format
+ panfrost_afbc_format(unsigned arch, enum pipe_format format)
+ {
++        /* sRGB does not change the pixel format itself, only the
++         * interpretation. The interpretation is handled by conversion hardware
++         * independent to the compression hardware, so we can compress sRGB
++         * formats by using the corresponding linear format.
++         */
++        format = util_format_linear(format);
++
+         /* Don't allow swizzled formats on v7 */
+         switch (format) {
+         case PIPE_FORMAT_B8G8R8A8_UNORM:
+-- 
+GitLab
+
+
+From 3358ce5dbcf113d340f5dd28db5b983eaa8e84bc Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 15:58:28 -0400
+Subject: [PATCH 08/15] panfrost: Enable AFBC of more formats
+
+Enable AFBC for all RGBA UNORM formats possible in v5. This does not
+cover the AFBC rules for newer gens, nor for YUV.
+
+Noticed with an uncompressed R8 UNORM texture in SuperTuxKart.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/lib/pan_afbc.c | 92 ++++++++++++++++++++++++-------------
+ 1 file changed, 59 insertions(+), 33 deletions(-)
+
+diff --git a/src/panfrost/lib/pan_afbc.c b/src/panfrost/lib/pan_afbc.c
+index 96c16b7fc8a0..7a524e53f668 100644
+--- a/src/panfrost/lib/pan_afbc.c
++++ b/src/panfrost/lib/pan_afbc.c
+@@ -66,6 +66,50 @@
+  * generate a linear staging buffer and use the GPU to blit AFBC<--->linear.
+  */
+ 
++static enum pipe_format
++unswizzled_format(enum pipe_format format)
++{
++        switch (format) {
++        case PIPE_FORMAT_A8_UNORM:
++        case PIPE_FORMAT_L8_UNORM:
++        case PIPE_FORMAT_I8_UNORM:
++                return PIPE_FORMAT_R8_UNORM;
++
++        case PIPE_FORMAT_L8A8_UNORM:
++                return PIPE_FORMAT_R8G8_UNORM;
++
++        case PIPE_FORMAT_B8G8R8_UNORM:
++                return PIPE_FORMAT_R8G8B8_UNORM;
++
++        case PIPE_FORMAT_R8G8B8X8_UNORM:
++        case PIPE_FORMAT_B8G8R8A8_UNORM:
++        case PIPE_FORMAT_B8G8R8X8_UNORM:
++        case PIPE_FORMAT_A8R8G8B8_UNORM:
++        case PIPE_FORMAT_X8R8G8B8_UNORM:
++        case PIPE_FORMAT_X8B8G8R8_UNORM:
++        case PIPE_FORMAT_A8B8G8R8_UNORM:
++                return PIPE_FORMAT_R8G8B8A8_UNORM;
++
++        case PIPE_FORMAT_B5G6R5_UNORM:
++                return PIPE_FORMAT_R5G6B5_UNORM;
++
++        case PIPE_FORMAT_B5G5R5A1_UNORM:
++                return PIPE_FORMAT_R5G5B5A1_UNORM;
++
++        case PIPE_FORMAT_R10G10B10X2_UNORM:
++        case PIPE_FORMAT_B10G10R10A2_UNORM:
++        case PIPE_FORMAT_B10G10R10X2_UNORM:
++                return PIPE_FORMAT_R10G10B10A2_UNORM;
++
++        case PIPE_FORMAT_A4B4G4R4_UNORM:
++        case PIPE_FORMAT_B4G4R4A4_UNORM:
++                return PIPE_FORMAT_R4G4B4A4_UNORM;
++
++        default:
++                return format;
++        }
++}
++
+ /* AFBC supports compressing a few canonical formats. Additional formats are
+  * available by using a canonical internal format. Given a PIPE format, find
+  * the canonical AFBC internal format if it exists, or NONE if the format
+@@ -81,50 +125,32 @@ panfrost_afbc_format(unsigned arch, enum pipe_format format)
+          */
+         format = util_format_linear(format);
+ 
+-        /* Don't allow swizzled formats on v7 */
+-        switch (format) {
+-        case PIPE_FORMAT_B8G8R8A8_UNORM:
+-        case PIPE_FORMAT_B8G8R8X8_UNORM:
+-        case PIPE_FORMAT_A8R8G8B8_UNORM:
+-        case PIPE_FORMAT_X8R8G8B8_UNORM:
+-        case PIPE_FORMAT_X8B8G8R8_UNORM:
+-        case PIPE_FORMAT_A8B8G8R8_UNORM:
+-        case PIPE_FORMAT_B8G8R8_UNORM:
+-        case PIPE_FORMAT_B5G6R5_UNORM:
+-                if (arch >= 7)
+-                        return PIPE_FORMAT_NONE;
++        /* Don't allow swizzled formats on v7+ */
++        if (arch >= 7 && format != unswizzled_format(format))
++                return PIPE_FORMAT_NONE;
+ 
+-                break;
+-        default:
+-                break;
+-        }
++        /* Otherwise swizzling doesn't affect AFBC */
++        format = unswizzled_format(format);
+ 
+         switch (format) {
++        case PIPE_FORMAT_R8_UNORM:
++        case PIPE_FORMAT_R8G8_UNORM:
++        case PIPE_FORMAT_R8G8B8_UNORM:
++        case PIPE_FORMAT_R8G8B8A8_UNORM:
++        case PIPE_FORMAT_R5G6B5_UNORM:
++        case PIPE_FORMAT_R5G5B5A1_UNORM:
++        case PIPE_FORMAT_R10G10B10A2_UNORM:
++        case PIPE_FORMAT_R4G4B4A4_UNORM:
++                return format;
++
+         case PIPE_FORMAT_Z16_UNORM:
+                 return PIPE_FORMAT_R8G8_UNORM;
+ 
+-        case PIPE_FORMAT_R8G8B8_UNORM:
+-        case PIPE_FORMAT_B8G8R8_UNORM:
+-                return PIPE_FORMAT_R8G8B8_UNORM;
+-
+-        case PIPE_FORMAT_R8G8B8A8_UNORM:
+-        case PIPE_FORMAT_R8G8B8X8_UNORM:
+         case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+         case PIPE_FORMAT_Z24X8_UNORM:
+         case PIPE_FORMAT_X24S8_UINT:
+-        case PIPE_FORMAT_B8G8R8A8_UNORM:
+-        case PIPE_FORMAT_B8G8R8X8_UNORM:
+-        case PIPE_FORMAT_A8R8G8B8_UNORM:
+-        case PIPE_FORMAT_X8R8G8B8_UNORM:
+-        case PIPE_FORMAT_X8B8G8R8_UNORM:
+-        case PIPE_FORMAT_A8B8G8R8_UNORM:
+                 return PIPE_FORMAT_R8G8B8A8_UNORM;
+ 
+-        case PIPE_FORMAT_R5G6B5_UNORM:
+-        case PIPE_FORMAT_B5G6R5_UNORM:
+-                return PIPE_FORMAT_R5G6B5_UNORM;
+-
+-        /* TODO: More AFBC formats */
+         default:
+                 return PIPE_FORMAT_NONE;
+         }
+-- 
+GitLab
+
+
+From 7939b3a277db74baec7e1f318935f6de2f2178a9 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 16:41:05 -0400
+Subject: [PATCH 09/15] panfrost: Don't set job_barrier on vertex jobs
+
+This was a hack needed for the old transform feedback code. This barrier
+is handled by the explicit XFB emulation that we're using on Midgard
+now, so we don't need the barrier in the general case.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_cmdstream.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index 1782ca17ce9d..1bedc58b3a80 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -2658,12 +2658,8 @@ panfrost_emit_vertex_tiler_jobs(struct panfrost_batch *batch,
+ {
+         struct panfrost_context *ctx = batch->ctx;
+ 
+-        /* XXX - set job_barrier in case buffers get ping-ponged and we need to
+-         * enforce ordering, this has a perf hit! See
+-         * KHR-GLES31.core.vertex_attrib_binding.advanced-iterations
+-         */
+         unsigned vertex = panfrost_add_job(&batch->pool.base, &batch->scoreboard,
+-                                           MALI_JOB_TYPE_VERTEX, true, false,
++                                           MALI_JOB_TYPE_VERTEX, false, false,
+                                            ctx->indirect_draw ?
+                                            batch->indirect_draw_job_id : 0,
+                                            0, vertex_job, false);
+-- 
+GitLab
+
+
+From a161b7f7b8c5624f3d059d60d5c99ccc3e0ba7f8 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 18:13:16 -0400
+Subject: [PATCH 10/15] panfrost: Print perf debug when flushing everything
+
+..Even if the only batch is the one that's currently bound.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_job.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index 898ba2a26cba..dfc72c779951 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -862,16 +862,15 @@ out:
+ void
+ panfrost_flush_all_batches(struct panfrost_context *ctx, const char *reason)
+ {
++        if (reason)
++                perf_debug_ctx(ctx, "Flushing everything due to: %s", reason);
++
+         struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+         panfrost_batch_submit(ctx, batch);
+ 
+         for (unsigned i = 0; i < PAN_MAX_BATCHES; i++) {
+-                if (ctx->batches.slots[i].seqnum) {
+-                        if (reason)
+-                                perf_debug_ctx(ctx, "Flushing everything due to: %s", reason);
+-
++                if (ctx->batches.slots[i].seqnum)
+                         panfrost_batch_submit(ctx, &ctx->batches.slots[i]);
+-                }
+         }
+ }
+ 
+-- 
+GitLab
+
+
+From 918207aefa343f195e84ed080e24215d0a571258 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 18:16:22 -0400
+Subject: [PATCH 11/15] panfrost: Add more perf warnings for flushes
+
+These flushes were lurking.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_job.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index dfc72c779951..dc7665d5fd46 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -174,8 +174,10 @@ panfrost_get_batch(struct panfrost_context *ctx,
+         assert(batch);
+ 
+         /* The selected slot is used, we need to flush the batch */
+-        if (batch->seqnum)
++        if (batch->seqnum) {
++                perf_debug_ctx(ctx, "Flushing batch due to seqnum overflow");
+                 panfrost_batch_submit(ctx, batch);
++        }
+ 
+         panfrost_batch_init(ctx, key, batch);
+ 
+@@ -262,8 +264,15 @@ panfrost_batch_update_access(struct panfrost_batch *batch,
+                                 continue;
+ 
+                         /* Submit if it's a user */
+-                        if (_mesa_set_search(batch->resources, rsrc))
++                        if (_mesa_set_search(batch->resources, rsrc)) {
++                                perf_debug_ctx(ctx,
++                                               "Flushing %s %" PRIu64 " due to %s of %s",
++                                               writer == batch ? "writer" : "reader",
++                                               batch->seqnum,
++                                               writes ? "write" : "read",
++                                               rsrc->image.data.bo->label);
+                                 panfrost_batch_submit(ctx, batch);
++                        }
+                 }
+         }
+ 
+-- 
+GitLab
+
+
+From b18be9cb3eb95c37b8f613eb17d7a3fc7803561d Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sun, 30 Oct 2022 21:24:34 -0400
+Subject: [PATCH 12/15] panfrost: Use
+ PIPE_CAP_VERTEX_ATTRIB_ELEMENT_ALIGNED_ONLY
+
+..instead of 4BYTE_ALIGNED_ONLY. This is more correct and avoids
+needless repacking. Noticed in Firefox, which was hitting the vbuf
+translate path.
+
+Fixes: e03622e50fc ("panfrost: Set STRIDE_4BYTE_ALIGNED_ONLY")
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_screen.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_screen.c b/src/gallium/drivers/panfrost/pan_screen.c
+index f0ecae940bb0..a3855f9302e3 100644
+--- a/src/gallium/drivers/panfrost/pan_screen.c
++++ b/src/gallium/drivers/panfrost/pan_screen.c
+@@ -210,8 +210,16 @@ panfrost_get_param(struct pipe_screen *screen, enum pipe_cap param)
+         case PIPE_CAP_QUERY_TIMESTAMP:
+                 return is_gl3;
+ 
+-        /* TODO: Where does this req come from in practice? */
+-        case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
++        /* The hardware requires element alignment for data conversion to work
++         * as expected. If data conversion is not required, this restriction is
++         * lifted on Midgard at a performance penalty. We conservatively
++         * require element alignment for vertex buffers, using u_vbuf to
++         * translate to match the hardware requirement.
++         *
++         * This is less heavy-handed than the 4BYTE_ALIGNED_ONLY caps, which
++         * would needlessly require alignment even for 8-bit formats.
++         */
++        case PIPE_CAP_VERTEX_ATTRIB_ELEMENT_ALIGNED_ONLY:
+                 return 1;
+ 
+         case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
+-- 
+GitLab
+
+
+From 2b5e04c0bdd5c017793d784798cc4baf9aac5107 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sun, 30 Oct 2022 21:37:51 -0400
+Subject: [PATCH 13/15] panfrost: Don't round up polygon list BOs
+
+Can waste large amounts of megabytes (11MB -> 16MB in one cases, wasting
+5MB... which adds up across processes, especially on the 2GB machines.)
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_cmdstream.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index 1bedc58b3a80..f7b1b12afc60 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -4745,7 +4745,6 @@ batch_get_polygon_list(struct panfrost_batch *batch)
+                                                              batch->key.width,
+                                                              batch->key.height,
+                                                              has_draws);
+-                size = util_next_power_of_two(size);
+ 
+                 /* Create the BO as invisible if we can. If there are no draws,
+                  * we need to write the polygon list manually because there's
+-- 
+GitLab
+
+
+From 7be4079b367a889d2cbcff328f5b6f8e4daf64e4 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sun, 30 Oct 2022 23:33:48 -0400
+Subject: [PATCH 14/15] panfrost: Clean up tiler calculations
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/lib/pan_tiler.c | 52 +++++++++---------------------------
+ 1 file changed, 12 insertions(+), 40 deletions(-)
+
+diff --git a/src/panfrost/lib/pan_tiler.c b/src/panfrost/lib/pan_tiler.c
+index e8bce5e2a609..72aad4dedc62 100644
+--- a/src/panfrost/lib/pan_tiler.c
++++ b/src/panfrost/lib/pan_tiler.c
+@@ -219,32 +219,6 @@
+ /* Likewise, each tile per level has 512 bytes of body */
+ #define FULL_BYTES_PER_TILE 0x200
+ 
+-/* If the width-x-height framebuffer is divided into tile_size-x-tile_size
+- * tiles, how many tiles are there? Rounding up in each direction. For the
+- * special case of tile_size=16, this aligns with the usual Midgard count.
+- * tile_size must be a power-of-two. Not really repeat code from AFBC/checksum,
+- * because those care about the stride (not just the overall count) and only at
+- * a a fixed-tile size (not any of a number of power-of-twos) */
+-
+-static unsigned
+-pan_tile_count(unsigned width, unsigned height, unsigned tile_width, unsigned tile_height)
+-{
+-        unsigned aligned_width = ALIGN_POT(width, tile_width);
+-        unsigned aligned_height = ALIGN_POT(height, tile_height);
+-
+-        unsigned tile_count_x = aligned_width / tile_width;
+-        unsigned tile_count_y = aligned_height / tile_height;
+-
+-        return tile_count_x * tile_count_y;
+-}
+-
+-/* For `masked_count` of the smallest tile sizes masked out, computes how the
+- * size of the polygon list header. We iterate the tile sizes (16x16 through
+- * 2048x2048). For each tile size, we figure out how many tiles there are at
+- * this hierarchy level and therefore many bytes this level is, leaving us with
+- * a byte count for each level. We then just sum up the byte counts across the
+- * levels to find a byte count for all levels. */
+-
+ static unsigned
+ panfrost_hierarchy_size(
+                 unsigned width,
+@@ -255,19 +229,16 @@ panfrost_hierarchy_size(
+         unsigned size = PROLOGUE_SIZE;
+ 
+         /* Iterate hierarchy levels */
++        u_foreach_bit(level, mask) {
++                assert(level <= (MAX_TILE_SHIFT - MIN_TILE_SHIFT) &&
++                       "invalid hierarchy mask");
+ 
+-        for (unsigned b = 0; b < (MAX_TILE_SHIFT - MIN_TILE_SHIFT); ++b) {
+-                /* Check if this level is enabled */
+-                if (!(mask & (1 << b)))
+-                        continue;
+-
+-                /* Shift from a level to a tile size */
+-                unsigned tile_size = (1 << b) * MIN_TILE_SIZE;
++                /* Levels are power-of-two sizes */
++                unsigned tile_size = MIN_TILE_SIZE << level;
+ 
+-                unsigned tile_count = pan_tile_count(width, height, tile_size, tile_size);
+-                unsigned level_count = bytes_per_tile * tile_count;
+-
+-                size += level_count;
++                size += DIV_ROUND_UP(width, tile_size) *
++                        DIV_ROUND_UP(height, tile_size) *
++                        bytes_per_tile;
+         }
+ 
+         /* This size will be used as an offset, so ensure it's aligned */
+@@ -287,12 +258,13 @@ static unsigned
+ panfrost_flat_size(unsigned width, unsigned height, unsigned dim, unsigned bytes_per_tile)
+ {
+         /* First, extract the tile dimensions */
+-
+         unsigned tw = (1 << (dim & 0b111)) * 8;
+         unsigned th = (1 << ((dim & (0b111 << 6)) >> 6)) * 8;
+ 
+-        /* tile_count is ceil(W/w) * ceil(H/h) */
+-        unsigned raw = pan_tile_count(width, height, tw, th) * bytes_per_tile;
++        /* Calculate the raw size */
++        unsigned raw = DIV_ROUND_UP(width, tw) *
++                       DIV_ROUND_UP(height, th) *
++                       bytes_per_tile;
+ 
+         /* Round down and add offset */
+         return 0x200 + ((raw / 0x200) * 0x200);
+-- 
+GitLab
+
+
+From d2c5dfe5e3d6cc236a1dba29b35e6cea6f274566 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sun, 30 Oct 2022 23:34:13 -0400
+Subject: [PATCH 15/15] panfrost: Heuristic to choose hier masks
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_cmdstream.c |  9 +++--
+ src/panfrost/lib/pan_cs.c                    |  3 +-
+ src/panfrost/lib/pan_cs.h                    |  6 ++++
+ src/panfrost/lib/pan_encoder.h               |  6 ++--
+ src/panfrost/lib/pan_tiler.c                 | 36 +++++++++++++++-----
+ 5 files changed, 45 insertions(+), 15 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index f7b1b12afc60..0f52e86c0e14 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -3667,6 +3667,9 @@ panfrost_direct_draw(struct panfrost_batch *batch,
+ 
+         if (info->index_size && PAN_ARCH >= 9) {
+                 indices = panfrost_get_index_buffer(batch, info, draw);
++
++                /* Use index count to estimate vertex count */
++                batch->tiler_ctx.vertex_count += draw->count;
+         } else if (info->index_size) {
+                 indices = panfrost_get_index_buffer_bounded(batch, info, draw,
+                                                             &min_index,
+@@ -3675,8 +3678,10 @@ panfrost_direct_draw(struct panfrost_batch *batch,
+                 /* Use the corresponding values */
+                 vertex_count = max_index - min_index + 1;
+                 ctx->offset_start = min_index + draw->index_bias;
++                batch->tiler_ctx.vertex_count += vertex_count;
+         } else {
+                 ctx->offset_start = draw->start;
++                batch->tiler_ctx.vertex_count += vertex_count;
+         }
+ 
+         if (info->instance_count > 1) {
+@@ -4739,12 +4744,12 @@ batch_get_polygon_list(struct panfrost_batch *batch)
+         struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
+ 
+         if (!batch->tiler_ctx.midgard.polygon_list) {
+-                bool has_draws = batch->scoreboard.first_tiler != NULL;
++                bool has_draws = !!batch->tiler_ctx.vertex_count;
+                 unsigned size =
+                         panfrost_tiler_get_polygon_list_size(dev,
+                                                              batch->key.width,
+                                                              batch->key.height,
+-                                                             has_draws);
++                                                             batch->tiler_ctx.vertex_count);
+ 
+                 /* Create the BO as invisible if we can. If there are no draws,
+                  * we need to write the polygon list manually because there's
+diff --git a/src/panfrost/lib/pan_cs.c b/src/panfrost/lib/pan_cs.c
+index cf405292c1b1..57384ac74d3a 100644
+--- a/src/panfrost/lib/pan_cs.c
++++ b/src/panfrost/lib/pan_cs.c
+@@ -603,7 +603,8 @@ pan_emit_midgard_tiler(const struct panfrost_device *dev,
+                         cfg.hierarchy_mask =
+                                 panfrost_choose_hierarchy_mask(fb->width,
+                                                                fb->height,
+-                                                               1, hierarchy);
++                                                               tiler_ctx->vertex_count,
++                                                               hierarchy);
+                         header_size = panfrost_tiler_header_size(fb->width,
+                                                                  fb->height,
+                                                                  cfg.hierarchy_mask,
+diff --git a/src/panfrost/lib/pan_cs.h b/src/panfrost/lib/pan_cs.h
+index 8186102e5c04..45f86be4c7f9 100644
+--- a/src/panfrost/lib/pan_cs.h
++++ b/src/panfrost/lib/pan_cs.h
+@@ -69,6 +69,12 @@ struct pan_fb_zs_attachment {
+ };
+ 
+ struct pan_tiler_context {
++        /* Sum of vertex counts (for non-indexed draws), index counts (for
++         * indexed draws on Valhall as a best effort), or ~0 if any indirect
++         * draws are used. Helps tune hierarchy masks.
++         */
++        uint64_t vertex_count;
++
+         union {
+                 mali_ptr bifrost;
+                 struct {
+diff --git a/src/panfrost/lib/pan_encoder.h b/src/panfrost/lib/pan_encoder.h
+index 68349996cded..94d5b2f266fd 100644
+--- a/src/panfrost/lib/pan_encoder.h
++++ b/src/panfrost/lib/pan_encoder.h
+@@ -52,14 +52,14 @@ panfrost_choose_hierarchy_mask(
+ static inline unsigned
+ panfrost_tiler_get_polygon_list_size(const struct panfrost_device *dev,
+                                      unsigned fb_width, unsigned fb_height,
+-                                     bool has_draws)
++                                     unsigned vertex_count)
+ {
+-        if (!has_draws)
++        if (!vertex_count)
+                 return MALI_MIDGARD_TILER_MINIMUM_HEADER_SIZE + 4;
+ 
+         bool hierarchy = !dev->model->quirks.no_hierarchical_tiling;
+         unsigned hierarchy_mask =
+-                panfrost_choose_hierarchy_mask(fb_width, fb_height, 1, hierarchy);
++                panfrost_choose_hierarchy_mask(fb_width, fb_height, vertex_count, hierarchy);
+ 
+         return panfrost_tiler_full_size(fb_width, fb_height, hierarchy_mask, hierarchy) +
+                 panfrost_tiler_header_size(fb_width, fb_height, hierarchy_mask, hierarchy);
+diff --git a/src/panfrost/lib/pan_tiler.c b/src/panfrost/lib/pan_tiler.c
+index 72aad4dedc62..43533faef2cd 100644
+--- a/src/panfrost/lib/pan_tiler.c
++++ b/src/panfrost/lib/pan_tiler.c
+@@ -321,12 +321,6 @@ panfrost_choose_tile_size(
+         return exp_w | (exp_h << 6);
+ }
+ 
+-/* In the future, a heuristic to choose a tiler hierarchy mask would go here.
+- * At the moment, we just default to 0xFF, which enables all possible hierarchy
+- * levels. Overall this yields good performance but presumably incurs a cost in
+- * memory bandwidth / power consumption / etc, at least on smaller scenes that
+- * don't really need all the smaller levels enabled */
+-
+ unsigned
+ panfrost_choose_hierarchy_mask(
+         unsigned width, unsigned height,
+@@ -340,7 +334,31 @@ panfrost_choose_hierarchy_mask(
+         if (!hierarchy)
+                 return panfrost_choose_tile_size(width, height, vertex_count);
+ 
+-        /* Otherwise, default everything on. TODO: Proper tests */
+-
+-        return 0xFF;
++        /* Heuristic: choose the largest minimum bin size such that there are
++         * an average of k vertices per bin at the lowest level. Model as:
++         *
++         * vertex_count / ((fb width / bin width) * (fb height / bin height)) = k
++         * bin size = sqrt(k (fb width) (fb height))
++         */
++        unsigned k = 4;
++
++        unsigned log2_min_bin_size =
++                util_logbase2_ceil((k * width * height) / vertex_count) / 2;
++
++        /* Do not use bins larger than the framebuffer. They will be empty. */
++        unsigned log2_max_bin_size = util_logbase2_ceil(MAX2(width, height));
++
++        /* Clamp to valid bin sizes */
++        log2_min_bin_size = CLAMP(log2_min_bin_size, MIN_TILE_SHIFT, MAX_TILE_SHIFT);
++        log2_max_bin_size = CLAMP(log2_max_bin_size, MIN_TILE_SHIFT, MAX_TILE_SHIFT);
++
++        /* Bin indices are numbered from 0 started with MIN_TILE_SIZE */
++        unsigned min_bin_index = log2_min_bin_size - MIN_TILE_SHIFT;
++        unsigned max_bin_index = log2_max_bin_size - MIN_TILE_SHIFT;
++
++        /* Enable up to 8 bins starting from the heuristic selected minimum. 8
++         * is the implementation specific maximum in supported Midgard devices.
++         */
++        return (BITFIELD_MASK(8) << min_bin_index) &
++                BITFIELD_MASK(max_bin_index + 1);
+ }
+-- 
+GitLab
+
