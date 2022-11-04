@@ -1,0 +1,5 @@
+**/pkg/**
+**/src/**
+mesa-git/mesa/
+box64-git/box64/
+linux-pbp/linux-*.tar.xz
