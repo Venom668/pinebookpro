@@ -2,7 +2,7 @@
 # Contributor: Dan Johansen <strit@manjaro.org>
 
 pkgbase=linux-pbp
-pkgver=5.18.12
+pkgver=6.0.7
 pkgrel=1
 _kernelname=${pkgbase#linux}
 _srcname=linux-${pkgver}
@@ -12,15 +12,15 @@ url="https://www.kernel.org/"
 license=('GPL2')
 makedepends=('xmlto' 'docbook-xsl' 'kmod' 'inetutils' 'bc' 'git' 'dtc')
 options=('!strip')
-source=("https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${pkgver}.tar.xz"
+source=("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${pkgver}.tar.xz"
         'config'
         'linux.preset'
         '60-linux.hook'
         '90-linux.hook'
 
         'drm-rockchip-support-gamma-control-on-RK3399.patch')
-sha256sums=('40b74d0942f255da07481710e1083412d06e37e45b8f9d9e34ae856db37b9527'
-            '6296ef535b754b25481d5dea7d31641d72b7c79dcd5472b38c8aaa0b10511230'
+sha256sums=('67dacc2b78605a56e997f4c08d009be87c98ec66f1870220226c8b3cc676590f'
+            'dfa6db5ea124cfa6e45a46c49c0d583cfc21baf0712811d3b719df521627d91b'
             '66644820faa950a5fc59181f5aefcbed6d7ed652b29aee69979a2be2a032025d'
             '452b8d4d71e1565ca91b1bebb280693549222ef51c47ba8964e411b2d461699c'
             '71df1b18a3885b151a3b9d926a91936da2acc90d5e27f1ad326745779cd3759d'
