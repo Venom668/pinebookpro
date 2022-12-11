@@ -2,7 +2,7 @@
 # Contributor: Dan Johansen <strit@manjaro.org>
 
 pkgbase=linux-pbp
-pkgver=6.0.7
+pkgver=6.0.12
 pkgrel=1
 _kernelname=${pkgbase#linux}
 _srcname=linux-${pkgver}
@@ -19,7 +19,7 @@ source=("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${pkgver}.tar.xz"
         '90-linux.hook'
 
         'drm-rockchip-support-gamma-control-on-RK3399.patch')
-sha256sums=('67dacc2b78605a56e997f4c08d009be87c98ec66f1870220226c8b3cc676590f'
+sha256sums=('89b730edf8942b49e02f9894244205886c9a214d629b35b88c4ff06ee9304f01'
             'dfa6db5ea124cfa6e45a46c49c0d583cfc21baf0712811d3b719df521627d91b'
             '66644820faa950a5fc59181f5aefcbed6d7ed652b29aee69979a2be2a032025d'
             '452b8d4d71e1565ca91b1bebb280693549222ef51c47ba8964e411b2d461699c'
