@@ -1,239 +1,294 @@
-From b2141415e7a78f6a0ddb6ee6d09d48e9c304e275 Mon Sep 17 00:00:00 2001
+From ae8faf8de844164a7bf1dd2304c9e8c919796642 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
-Date: Wed, 2 Nov 2022 13:43:11 -0400
-Subject: [PATCH 01/15] panfrost: Don't copy resources if replaced
+Date: Tue, 15 Nov 2022 11:16:15 -0500
+Subject: [PATCH 01/14] panfrost: Fix reference counting with batch->resources
 
-If a synchronized transfer_map is going to overwrite an entire resource,
-there's no need to memcpy in the original contents ahead-of-time. This
-memcpy is particularly bad for large buffers where it's copying WC->WC,
-although that could be mitigated with threaded_context's cpu_storage in
-the future if needed.
+Refactor accesses to batch->resources to happen through safe helpers
+that update the appropriate bookkeeping. This makes it obvious that (in
+particular) reference counts are updated when they should be.
 
-Prevents a performance regression in glmark2's buffer scenes from the
-next patch, hence the Cc.
+The functional change is that we are now correctly unreferencing
+resources during shadowing, fixing a leak of shadowed resources.
 
-Cc: mesa-stable
+Closes: #7362
+Fixes: 2d8f28df731 ("panfrost: Replace resource shadowing flush")
 Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+Reported-by: Mastodon, apparently
 ---
- src/gallium/drivers/panfrost/pan_resource.c | 25 ++++++++++++++++++++-
- 1 file changed, 24 insertions(+), 1 deletion(-)
-
-diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
-index a2992253a2bb..ac171ca13dc9 100644
---- a/src/gallium/drivers/panfrost/pan_resource.c
-+++ b/src/gallium/drivers/panfrost/pan_resource.c
-@@ -936,6 +936,17 @@ panfrost_store_tiled_images(struct panfrost_transfer *transfer,
-         }
- }
- 
-+static bool
-+panfrost_box_covers_resource(const struct pipe_resource *resource,
-+                             const struct pipe_box *box)
-+{
-+        return resource->last_level == 0 &&
-+               resource->width0 == box->width &&
-+               resource->height0 == box->height &&
-+               resource->depth0 == box->depth &&
-+               resource->array_size == 1;
-+}
-+
- static void *
- panfrost_ptr_map(struct pipe_context *pctx,
-                       struct pipe_resource *resource,
-@@ -1005,6 +1016,18 @@ panfrost_ptr_map(struct pipe_context *pctx,
-         if (dev->debug & (PAN_DBG_TRACE | PAN_DBG_SYNC))
-                 pandecode_inject_mmap(bo->ptr.gpu, bo->ptr.cpu, bo->size, NULL);
- 
-+        /* Upgrade DISCARD_RANGE to WHOLE_RESOURCE if the whole resource is
-+         * being mapped.
-+         */
-+        if ((usage & PIPE_MAP_DISCARD_RANGE) &&
-+            !(usage & PIPE_MAP_UNSYNCHRONIZED) &&
-+            !(resource->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
-+            panfrost_box_covers_resource(resource, box) &&
-+            !(rsrc->image.data.bo->flags & PAN_BO_SHARED)) {
-+
-+                usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
-+        }
-+
-         bool create_new_bo = usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE;
-         bool copy_resource = false;
- 
-@@ -1025,7 +1048,7 @@ panfrost_ptr_map(struct pipe_context *pctx,
-                 panfrost_bo_wait(bo, INT64_MAX, false);
- 
-                 create_new_bo = true;
--                copy_resource = true;
-+                copy_resource = !panfrost_box_covers_resource(resource, box);
-         }
- 
-         if (create_new_bo) {
--- 
-GitLab
-
-
-From d28a043e581fb0245a552db3ee95f71619543879 Mon Sep 17 00:00:00 2001
-From: Alyssa Rosenzweig <alyssa@collabora.com>
-Date: Sat, 29 Oct 2022 14:42:36 -0400
-Subject: [PATCH 02/15] panfrost: Replace resource shadowing flush
-
-The entire point of resource shadowing is to avoid unnecessary flushing.
-Flushing readers after shadowing is counterproductive. A refresher on
-how resource shadowing is supposed to work:
-
-First, we determine if it's beneficial to shadow resources. If so, we
-create a new backing buffer object. We flush the current writer of the
-resource, if there is one, so the current contents become known to the
-CPU. If we are not discarding the original resource, we then copy the
-existing contents of the buffer to the new shadow buffer on the CPU.
-Finally, we swap the resource's backing buffer for our shadow. Any batch
-that reads the resource will continue to read the old copy of the
-resource, and any future draw calls will see the new copy with the
-change implemented.
-
-Where did we go wrong?
-
-In 988d5aae74d ("panfrost: Flush resources when shadowing"), we started
-flushing all readers. We didn't actually need to flush, we just needed
-to avoid dangling references on the batches reading the old copy of the
-resource. But that's easily enough avoided: just remove the references.
-The batches still hold a reference to the underlying BO, which will be
-freed at the right time regardless.
-
-Originally motivated by glmark2 -bbuffer:update-method=subdata, which
-has some pathological access paterns.
-
-Firefox is a lot faster anecdotally (now scrolling at 60fps in firefox).
-
-But what actually motivated this is an apitrace from Duckstation's GLES
-renderer. With this patch, the in-game portion is improved 3fps to 21fps.
-
-Closes: #4028
-Fixes: 988d5aae74d ("panfrost: Flush resources when shadowing")
-Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
----
- src/gallium/drivers/panfrost/pan_job.c      | 40 ++++++++++++++++++++-
- src/gallium/drivers/panfrost/pan_job.h      |  5 +++
- src/gallium/drivers/panfrost/pan_resource.c | 17 ++++-----
- 3 files changed, 53 insertions(+), 9 deletions(-)
+ src/gallium/drivers/panfrost/pan_job.c | 116 ++++++++++++++++---------
+ src/gallium/drivers/panfrost/pan_job.h |   2 +-
+ 2 files changed, 74 insertions(+), 44 deletions(-)
 
 diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
-index 4074ae2cbd71..898ba2a26cba 100644
+index 5e8176469369..27be0ee10ed6 100644
 --- a/src/gallium/drivers/panfrost/pan_job.c
 +++ b/src/gallium/drivers/panfrost/pan_job.c
-@@ -122,7 +122,7 @@ panfrost_batch_cleanup(struct panfrost_context *ctx, struct panfrost_batch *batc
-                 panfrost_bo_unreference(bo);
-         }
- 
--        set_foreach_remove(batch->resources, entry) {
-+        set_foreach(batch->resources, entry) {
-                 struct panfrost_resource *rsrc = (void *) entry->key;
- 
-                 if (_mesa_hash_table_search(ctx->writers, rsrc)) {
-@@ -364,6 +364,44 @@ panfrost_batch_write_rsrc(struct panfrost_batch *batch,
-         panfrost_batch_update_access(batch, rsrc, true);
+@@ -99,6 +99,74 @@ panfrost_batch_init(struct panfrost_context *ctx,
+         screen->vtbl.init_batch(batch);
  }
  
-+void
-+panfrost_resource_swap_bo(struct panfrost_context *ctx,
-+                          struct panfrost_resource *rsrc,
-+                          struct panfrost_bo *newbo)
++/*
++ * Safe helpers for manipulating batch->resources follow. In addition to
++ * wrapping the underlying set operations, these update the required
++ * bookkeeping for resource tracking and reference counting.
++ */
++static bool
++panfrost_batch_uses_resource(struct panfrost_batch *batch,
++                             struct panfrost_resource *rsrc)
 +{
-+        /* Any batch writing this resource is writing to the old BO, not the
-+         * new BO. After swapping the resource's backing BO, there will be no
-+         * writers of the updated resource. Existing writers still hold a
-+         * reference to the old BO for reference counting.
-+         */
++        return _mesa_set_search(batch->resources, rsrc) != NULL;
++}
++
++static void
++panfrost_batch_add_resource(struct panfrost_batch *batch,
++                            struct panfrost_resource *rsrc)
++{
++        bool found = false;
++        _mesa_set_search_or_add(batch->resources, rsrc, &found);
++
++        if (!found) {
++                /* Cache number of batches accessing a resource */
++                rsrc->track.nr_users++;
++
++                /* Reference the resource on the batch */
++                pipe_reference(NULL, &rsrc->base.reference);
++        }
++}
++
++static void
++panfrost_batch_remove_resource_internal(struct panfrost_context *ctx,
++                                        struct panfrost_resource *rsrc)
++{
 +        struct hash_entry *writer = _mesa_hash_table_search(ctx->writers, rsrc);
 +        if (writer) {
 +                _mesa_hash_table_remove(ctx->writers, writer);
 +                rsrc->track.nr_writers--;
 +        }
 +
-+        /* Likewise, any batch reading this resource is reading the old BO, and
-+         * after swapping will not be reading this resource.
-+         */
-+        unsigned i;
-+        foreach_batch(ctx, i) {
-+                struct panfrost_batch *batch = &ctx->batches.slots[i];
-+                struct set_entry *ent = _mesa_set_search(batch->resources, rsrc);
-+
-+                if (!ent)
-+                        continue;
-+
-+                _mesa_set_remove(batch->resources, ent);
-+                rsrc->track.nr_users--;
-+        }
-+
-+        /* Swap the pointers, dropping a reference to the old BO which is no
-+         * long referenced from the resource
-+         */
-+        panfrost_bo_unreference(rsrc->image.data.bo);
-+        rsrc->image.data.bo = newbo;
++        rsrc->track.nr_users--;
++        pipe_resource_reference((struct pipe_resource **) &rsrc, NULL);
 +}
 +
- struct panfrost_bo *
- panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
-                          uint32_t create_flags, enum pipe_shader_type stage,
-diff --git a/src/gallium/drivers/panfrost/pan_job.h b/src/gallium/drivers/panfrost/pan_job.h
-index b5c5c270ed8b..52eac4e0b17f 100644
---- a/src/gallium/drivers/panfrost/pan_job.h
-+++ b/src/gallium/drivers/panfrost/pan_job.h
-@@ -219,6 +219,11 @@ panfrost_batch_write_rsrc(struct panfrost_batch *batch,
-                           struct panfrost_resource *rsrc,
-                           enum pipe_shader_type stage);
- 
-+void
-+panfrost_resource_swap_bo(struct panfrost_context *ctx,
-+                          struct panfrost_resource *rsrc,
-+                          struct panfrost_bo *newbo);
++static void
++panfrost_batch_remove_resource_if_present(struct panfrost_context *ctx,
++                                          struct panfrost_batch *batch,
++                                          struct panfrost_resource *rsrc)
++{
++        struct set_entry *ent = _mesa_set_search(batch->resources, rsrc);
 +
- struct panfrost_bo *
- panfrost_batch_create_bo(struct panfrost_batch *batch, size_t size,
-                          uint32_t create_flags, enum pipe_shader_type stage,
-diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
-index ac171ca13dc9..0bb5e975866d 100644
---- a/src/gallium/drivers/panfrost/pan_resource.c
-+++ b/src/gallium/drivers/panfrost/pan_resource.c
-@@ -1051,6 +1051,14 @@ panfrost_ptr_map(struct pipe_context *pctx,
-                 copy_resource = !panfrost_box_covers_resource(resource, box);
-         }
- 
-+        /* Shadowing with separate stencil may require additional accounting.
-+         * Bail in these exotic cases.
-+         */
-+        if (rsrc->separate_stencil) {
-+                create_new_bo = false;
-+                copy_resource = false;
++        if (ent != NULL) {
++                panfrost_batch_remove_resource_internal(ctx, rsrc);
++                _mesa_set_remove(batch->resources, ent);
++        }
++}
++
++static void
++panfrost_batch_destroy_resources(struct panfrost_context *ctx,
++                                 struct panfrost_batch *batch)
++{
++        set_foreach(batch->resources, entry) {
++                struct panfrost_resource *rsrc = (void *) entry->key;
++
++                panfrost_batch_remove_resource_internal(ctx, rsrc);
 +        }
 +
-         if (create_new_bo) {
-                 /* Make sure we re-emit any descriptors using this resource */
-                 panfrost_dirty_state_all(ctx);
-@@ -1078,14 +1086,7 @@ panfrost_ptr_map(struct pipe_context *pctx,
-                                 if (copy_resource)
-                                         memcpy(newbo->ptr.cpu, rsrc->image.data.bo->ptr.cpu, bo->size);
++        _mesa_set_destroy(batch->resources, NULL);
++}
++
+ static void
+ panfrost_batch_cleanup(struct panfrost_context *ctx, struct panfrost_batch *batch)
+ {
+@@ -122,20 +190,7 @@ panfrost_batch_cleanup(struct panfrost_context *ctx, struct panfrost_batch *batc
+                 panfrost_bo_unreference(bo);
+         }
  
--                                panfrost_bo_unreference(bo);
--                                rsrc->image.data.bo = newbo;
+-        set_foreach(batch->resources, entry) {
+-                struct panfrost_resource *rsrc = (void *) entry->key;
 -
--                                /* Swapping out the BO will invalidate batches
--                                 * accessing this resource, flush them but do
--                                 * not wait for them.
--                                 */
--                                panfrost_flush_batches_accessing_rsrc(ctx, rsrc, "Resource shadowing");
-+                                panfrost_resource_swap_bo(ctx, rsrc, newbo);
+-                if (_mesa_hash_table_search(ctx->writers, rsrc)) {
+-                        _mesa_hash_table_remove_key(ctx->writers, rsrc);
+-                        rsrc->track.nr_writers--;
+-                }
+-
+-                rsrc->track.nr_users--;
+-
+-                pipe_resource_reference((struct pipe_resource **) &rsrc, NULL);
+-        }
+-
+-        _mesa_set_destroy(batch->resources, NULL);
++        panfrost_batch_destroy_resources(ctx, batch);
+         panfrost_pool_cleanup(&batch->pool);
+         panfrost_pool_cleanup(&batch->invisible_pool);
  
- 	                        if (!copy_resource &&
-                                     drm_is_afbc(rsrc->image.layout.modifier))
+@@ -239,17 +294,8 @@ panfrost_batch_update_access(struct panfrost_batch *batch,
+         uint32_t batch_idx = panfrost_batch_idx(batch);
+         struct hash_entry *entry = _mesa_hash_table_search(ctx->writers, rsrc);
+         struct panfrost_batch *writer = entry ? entry->data : NULL;
+-        bool found = false;
+ 
+-        _mesa_set_search_or_add(batch->resources, rsrc, &found);
+-
+-        if (!found) {
+-                /* Cache number of batches accessing a resource */
+-                rsrc->track.nr_users++;
+-
+-                /* Reference the resource on the batch */
+-                pipe_reference(NULL, &rsrc->base.reference);
+-        }
++        panfrost_batch_add_resource(batch, rsrc);
+ 
+         /* Flush users if required */
+         if (writes || ((writer != NULL) && (writer != batch))) {
+@@ -262,7 +308,7 @@ panfrost_batch_update_access(struct panfrost_batch *batch,
+                                 continue;
+ 
+                         /* Submit if it's a user */
+-                        if (_mesa_set_search(batch->resources, rsrc))
++                        if (panfrost_batch_uses_resource(batch, rsrc))
+                                 panfrost_batch_submit(ctx, batch);
+                 }
+         }
+@@ -363,30 +409,14 @@ panfrost_resource_swap_bo(struct panfrost_context *ctx,
+                           struct panfrost_resource *rsrc,
+                           struct panfrost_bo *newbo)
+ {
+-        /* Any batch writing this resource is writing to the old BO, not the
+-         * new BO. After swapping the resource's backing BO, there will be no
+-         * writers of the updated resource. Existing writers still hold a
+-         * reference to the old BO for reference counting.
+-         */
+-        struct hash_entry *writer = _mesa_hash_table_search(ctx->writers, rsrc);
+-        if (writer) {
+-                _mesa_hash_table_remove(ctx->writers, writer);
+-                rsrc->track.nr_writers--;
+-        }
+-
+         /* Likewise, any batch reading this resource is reading the old BO, and
+          * after swapping will not be reading this resource.
+          */
+         unsigned i;
+         foreach_batch(ctx, i) {
+                 struct panfrost_batch *batch = &ctx->batches.slots[i];
+-                struct set_entry *ent = _mesa_set_search(batch->resources, rsrc);
+-
+-                if (!ent)
+-                        continue;
+ 
+-                _mesa_set_remove(batch->resources, ent);
+-                rsrc->track.nr_users--;
++                panfrost_batch_remove_resource_if_present(ctx, batch, rsrc);
+         }
+ 
+         /* Swap the pointers, dropping a reference to the old BO which is no
+@@ -891,7 +921,7 @@ panfrost_flush_batches_accessing_rsrc(struct panfrost_context *ctx,
+         foreach_batch(ctx, i) {
+                 struct panfrost_batch *batch = &ctx->batches.slots[i];
+ 
+-                if (!_mesa_set_search(batch->resources, rsrc))
++                if (!panfrost_batch_uses_resource(batch, rsrc))
+                         continue;
+ 
+                 perf_debug_ctx(ctx, "Flushing user due to: %s", reason);
+diff --git a/src/gallium/drivers/panfrost/pan_job.h b/src/gallium/drivers/panfrost/pan_job.h
+index 52eac4e0b17f..23263c54e071 100644
+--- a/src/gallium/drivers/panfrost/pan_job.h
++++ b/src/gallium/drivers/panfrost/pan_job.h
+@@ -192,7 +192,7 @@ struct panfrost_batch {
+         struct pan_tristate sprite_coord_origin;
+         struct pan_tristate first_provoking_vertex;
+ 
+-        /* Referenced resources */
++        /* Referenced resources, holds a pipe_reference. */
+         struct set *resources;
+ };
+ 
 -- 
 GitLab
 
 
-From 7c61cb5e9b7424b52fc36b8af2069abedb356a24 Mon Sep 17 00:00:00 2001
+From f302ab24542b99c7b36be7ae35b4253d3c65ea21 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 15:45:03 -0400
+Subject: [PATCH 02/14] pan/mdg: Fix out-of-order execution
+
+We can go up to 15 instructions out of order (performance fix) but we
+can't go past a branch (bug fix).
+
+Fixes: 30a393f4581 ("pan/mdg: Enable out-of-order execution after texture ops")
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/panfrost/midgard/midgard.h      |  4 ++--
+ src/panfrost/midgard/midgard_emit.c | 16 ++++++++++------
+ 2 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/src/panfrost/midgard/midgard.h b/src/panfrost/midgard/midgard.h
+index d7715c697cd6..2121dc4790b7 100644
+--- a/src/panfrost/midgard/midgard.h
++++ b/src/panfrost/midgard/midgard.h
+@@ -937,8 +937,8 @@ __attribute__((__packed__))
+          * be any dependency (the blob appears to forbid even accessing other
+          * channels of a given texture register). */
+ 
+-        unsigned out_of_order   : 2;
+-        unsigned unknown4  : 10;
++        unsigned out_of_order   : 4;
++        unsigned unknown4  : 8;
+ 
+         /* In immediate mode, each offset field is an immediate range [0, 7].
+          *
+diff --git a/src/panfrost/midgard/midgard_emit.c b/src/panfrost/midgard/midgard_emit.c
+index 716e434b7bcb..52dd4a85968f 100644
+--- a/src/panfrost/midgard/midgard_emit.c
++++ b/src/panfrost/midgard/midgard_emit.c
+@@ -416,10 +416,11 @@ mir_pack_swizzle_tex(midgard_instruction *ins)
+         /* TODO: bias component */
+ }
+ 
+-/* Up to 3 { ALU, LDST } bundles can execute in parallel with a texture op.
++/*
++ * Up to 15 { ALU, LDST } bundles can execute in parallel with a texture op.
+  * Given a texture op, lookahead to see how many such bundles we can flag for
+- * OoO execution */
+-
++ * OoO execution
++ */
+ static bool
+ mir_can_run_ooo(midgard_block *block, midgard_bundle *bundle,
+                 unsigned dependency)
+@@ -432,11 +433,14 @@ mir_can_run_ooo(midgard_block *block, midgard_bundle *bundle,
+         if (!IS_ALU(bundle->tag) && bundle->tag != TAG_LOAD_STORE_4)
+                 return false;
+ 
+-        /* Ensure there is no read-after-write dependency */
+-
+         for (unsigned i = 0; i < bundle->instruction_count; ++i) {
+                 midgard_instruction *ins = bundle->instructions[i];
+ 
++                /* No branches, jumps, or discards */
++                if (ins->compact_branch)
++                        return false;
++
++                /* No read-after-write data dependencies */
+                 mir_foreach_src(ins, s) {
+                         if (ins->src[s] == dependency)
+                                 return false;
+@@ -452,7 +456,7 @@ mir_pack_tex_ooo(midgard_block *block, midgard_bundle *bundle, midgard_instructi
+ {
+         unsigned count = 0;
+ 
+-        for (count = 0; count < 3; ++count) {
++        for (count = 0; count < 15; ++count) {
+                 if (!mir_can_run_ooo(block, bundle + count + 1, ins->dest))
+                         break;
+         }
+-- 
+GitLab
+
+
+From 1bbeb42d7df7d55a9c9647427bcbd7dcff0f1f54 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Thu, 27 Oct 2022 22:15:24 -0400
-Subject: [PATCH 03/15] pan/mdg: Refuse to schedule CSEL.vector to SMUL
+Subject: [PATCH 03/14] pan/mdg: Refuse to schedule CSEL.vector to SMUL
 
 Even if we only mask a single component from the result of CSEL.vector,
 in our IR we treat its semantics as vector which causes trouble with
@@ -299,10 +354,10 @@ index 4e12a25064a5..e45949085990 100644
 GitLab
 
 
-From 065211bf414c893958cb8ee4d40c62c11ed4b9e2 Mon Sep 17 00:00:00 2001
+From 9646abba3da78b7a693b4936dbd8e16a1deecf9e Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Thu, 27 Oct 2022 21:28:34 -0400
-Subject: [PATCH 04/15] pan/mdg: Emulate 8-bit with the 16-bit pipe
+Subject: [PATCH 04/14] pan/mdg: Emulate 8-bit with the 16-bit pipe
 
 We don't care to support i8vec16, we just need a bit of 8-bit support to
 implement format packing/unpacking in blend shaders. We're already doing
@@ -371,7 +426,7 @@ index 940a98b75e0b..69d88eb4a601 100644
           *
           *      vlut.fsinr hr0, hr0
 diff --git a/src/panfrost/midgard/midgard_emit.c b/src/panfrost/midgard/midgard_emit.c
-index 716e434b7bcb..6000fc4577f1 100644
+index 52dd4a85968f..45b23db3f723 100644
 --- a/src/panfrost/midgard/midgard_emit.c
 +++ b/src/panfrost/midgard/midgard_emit.c
 @@ -340,12 +340,6 @@ mir_pack_vector_srcs(midgard_instruction *ins, midgard_vector_alu *alu)
@@ -421,89 +476,10 @@ index 5ff9469bcff9..a4ea28fcdc81 100644
 GitLab
 
 
-From b0cdf50ad5267561d4438ea4a280850d9d090108 Mon Sep 17 00:00:00 2001
-From: Alyssa Rosenzweig <alyssa@collabora.com>
-Date: Sat, 29 Oct 2022 15:45:03 -0400
-Subject: [PATCH 05/15] pan/mdg: Fix out-of-order execution
-
-We can go up to 15 instructions out of order (performance fix) but we
-can't go past a branch (bug fix).
-
-Fixes: 30a393f4581 ("pan/mdg: Enable out-of-order execution after texture ops")
-Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
----
- src/panfrost/midgard/midgard.h      |  4 ++--
- src/panfrost/midgard/midgard_emit.c | 16 ++++++++++------
- 2 files changed, 12 insertions(+), 8 deletions(-)
-
-diff --git a/src/panfrost/midgard/midgard.h b/src/panfrost/midgard/midgard.h
-index d7715c697cd6..2121dc4790b7 100644
---- a/src/panfrost/midgard/midgard.h
-+++ b/src/panfrost/midgard/midgard.h
-@@ -937,8 +937,8 @@ __attribute__((__packed__))
-          * be any dependency (the blob appears to forbid even accessing other
-          * channels of a given texture register). */
- 
--        unsigned out_of_order   : 2;
--        unsigned unknown4  : 10;
-+        unsigned out_of_order   : 4;
-+        unsigned unknown4  : 8;
- 
-         /* In immediate mode, each offset field is an immediate range [0, 7].
-          *
-diff --git a/src/panfrost/midgard/midgard_emit.c b/src/panfrost/midgard/midgard_emit.c
-index 6000fc4577f1..45b23db3f723 100644
---- a/src/panfrost/midgard/midgard_emit.c
-+++ b/src/panfrost/midgard/midgard_emit.c
-@@ -410,10 +410,11 @@ mir_pack_swizzle_tex(midgard_instruction *ins)
-         /* TODO: bias component */
- }
- 
--/* Up to 3 { ALU, LDST } bundles can execute in parallel with a texture op.
-+/*
-+ * Up to 15 { ALU, LDST } bundles can execute in parallel with a texture op.
-  * Given a texture op, lookahead to see how many such bundles we can flag for
-- * OoO execution */
--
-+ * OoO execution
-+ */
- static bool
- mir_can_run_ooo(midgard_block *block, midgard_bundle *bundle,
-                 unsigned dependency)
-@@ -426,11 +427,14 @@ mir_can_run_ooo(midgard_block *block, midgard_bundle *bundle,
-         if (!IS_ALU(bundle->tag) && bundle->tag != TAG_LOAD_STORE_4)
-                 return false;
- 
--        /* Ensure there is no read-after-write dependency */
--
-         for (unsigned i = 0; i < bundle->instruction_count; ++i) {
-                 midgard_instruction *ins = bundle->instructions[i];
- 
-+                /* No branches, jumps, or discards */
-+                if (ins->compact_branch)
-+                        return false;
-+
-+                /* No read-after-write data dependencies */
-                 mir_foreach_src(ins, s) {
-                         if (ins->src[s] == dependency)
-                                 return false;
-@@ -446,7 +450,7 @@ mir_pack_tex_ooo(midgard_block *block, midgard_bundle *bundle, midgard_instructi
- {
-         unsigned count = 0;
- 
--        for (count = 0; count < 3; ++count) {
-+        for (count = 0; count < 15; ++count) {
-                 if (!mir_can_run_ooo(block, bundle + count + 1, ins->dest))
-                         break;
-         }
--- 
-GitLab
-
-
-From c40e0dc1cde58f108f37689876fb97371e395744 Mon Sep 17 00:00:00 2001
+From b1c9ee39d7334e08e76928a18a13b940c447cc27 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Sat, 29 Oct 2022 15:38:26 -0400
-Subject: [PATCH 06/15] panfrost: Enable AFBC of cube maps
+Subject: [PATCH 05/14] panfrost: Enable AFBC of cube maps
 
 Missed by mistake. This is not the same as 3D AFBC, it's just like a 2D
 array. Noted in a supertuxkart pandecode.
@@ -515,10 +491,10 @@ Cc: mesa-stable
  1 file changed, 3 insertions(+), 1 deletion(-)
 
 diff --git a/src/gallium/drivers/panfrost/pan_resource.c b/src/gallium/drivers/panfrost/pan_resource.c
-index 0bb5e975866d..c436beda9eba 100644
+index 11209a9b0225..9e95b793391e 100644
 --- a/src/gallium/drivers/panfrost/pan_resource.c
 +++ b/src/gallium/drivers/panfrost/pan_resource.c
-@@ -325,8 +325,10 @@ panfrost_should_afbc(struct panfrost_device *dev,
+@@ -316,8 +316,10 @@ panfrost_should_afbc(struct panfrost_device *dev,
  
          switch (pres->base.target) {
          case PIPE_TEXTURE_2D:
@@ -534,10 +510,10 @@ index 0bb5e975866d..c436beda9eba 100644
 GitLab
 
 
-From cf2ea6c7790ede6a291ad1d4e8e055c125728086 Mon Sep 17 00:00:00 2001
+From bfbc68412e12f17e526b26444ca5e91a41c46047 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Thu, 27 Oct 2022 17:31:08 -0400
-Subject: [PATCH 07/15] panfrost: Enable AFBC of sRGB formats
+Subject: [PATCH 06/14] panfrost: Enable AFBC of sRGB formats
 
 AFBC of sRGB formats should just work. We just need to flip it on and enjoy
 the improved performance.
@@ -577,10 +553,10 @@ index bf655e7a2c29..96c16b7fc8a0 100644
 GitLab
 
 
-From 3358ce5dbcf113d340f5dd28db5b983eaa8e84bc Mon Sep 17 00:00:00 2001
+From 8dd0bb85789513b281e1edde1823f10e7f3f6f07 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Sat, 29 Oct 2022 15:58:28 -0400
-Subject: [PATCH 08/15] panfrost: Enable AFBC of more formats
+Subject: [PATCH 07/14] panfrost: Enable AFBC of more formats
 
 Enable AFBC for all RGBA UNORM formats possible in v5. This does not
 cover the AFBC rules for newer gens, nor for YUV.
@@ -717,136 +693,10 @@ index 96c16b7fc8a0..7a524e53f668 100644
 GitLab
 
 
-From 7939b3a277db74baec7e1f318935f6de2f2178a9 Mon Sep 17 00:00:00 2001
-From: Alyssa Rosenzweig <alyssa@collabora.com>
-Date: Sat, 29 Oct 2022 16:41:05 -0400
-Subject: [PATCH 09/15] panfrost: Don't set job_barrier on vertex jobs
-
-This was a hack needed for the old transform feedback code. This barrier
-is handled by the explicit XFB emulation that we're using on Midgard
-now, so we don't need the barrier in the general case.
-
-Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
----
- src/gallium/drivers/panfrost/pan_cmdstream.c | 6 +-----
- 1 file changed, 1 insertion(+), 5 deletions(-)
-
-diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
-index 1782ca17ce9d..1bedc58b3a80 100644
---- a/src/gallium/drivers/panfrost/pan_cmdstream.c
-+++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
-@@ -2658,12 +2658,8 @@ panfrost_emit_vertex_tiler_jobs(struct panfrost_batch *batch,
- {
-         struct panfrost_context *ctx = batch->ctx;
- 
--        /* XXX - set job_barrier in case buffers get ping-ponged and we need to
--         * enforce ordering, this has a perf hit! See
--         * KHR-GLES31.core.vertex_attrib_binding.advanced-iterations
--         */
-         unsigned vertex = panfrost_add_job(&batch->pool.base, &batch->scoreboard,
--                                           MALI_JOB_TYPE_VERTEX, true, false,
-+                                           MALI_JOB_TYPE_VERTEX, false, false,
-                                            ctx->indirect_draw ?
-                                            batch->indirect_draw_job_id : 0,
-                                            0, vertex_job, false);
--- 
-GitLab
-
-
-From a161b7f7b8c5624f3d059d60d5c99ccc3e0ba7f8 Mon Sep 17 00:00:00 2001
-From: Alyssa Rosenzweig <alyssa@collabora.com>
-Date: Sat, 29 Oct 2022 18:13:16 -0400
-Subject: [PATCH 10/15] panfrost: Print perf debug when flushing everything
-
-..Even if the only batch is the one that's currently bound.
-
-Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
----
- src/gallium/drivers/panfrost/pan_job.c | 9 ++++-----
- 1 file changed, 4 insertions(+), 5 deletions(-)
-
-diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
-index 898ba2a26cba..dfc72c779951 100644
---- a/src/gallium/drivers/panfrost/pan_job.c
-+++ b/src/gallium/drivers/panfrost/pan_job.c
-@@ -862,16 +862,15 @@ out:
- void
- panfrost_flush_all_batches(struct panfrost_context *ctx, const char *reason)
- {
-+        if (reason)
-+                perf_debug_ctx(ctx, "Flushing everything due to: %s", reason);
-+
-         struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
-         panfrost_batch_submit(ctx, batch);
- 
-         for (unsigned i = 0; i < PAN_MAX_BATCHES; i++) {
--                if (ctx->batches.slots[i].seqnum) {
--                        if (reason)
--                                perf_debug_ctx(ctx, "Flushing everything due to: %s", reason);
--
-+                if (ctx->batches.slots[i].seqnum)
-                         panfrost_batch_submit(ctx, &ctx->batches.slots[i]);
--                }
-         }
- }
- 
--- 
-GitLab
-
-
-From 918207aefa343f195e84ed080e24215d0a571258 Mon Sep 17 00:00:00 2001
-From: Alyssa Rosenzweig <alyssa@collabora.com>
-Date: Sat, 29 Oct 2022 18:16:22 -0400
-Subject: [PATCH 11/15] panfrost: Add more perf warnings for flushes
-
-These flushes were lurking.
-
-Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
----
- src/gallium/drivers/panfrost/pan_job.c | 13 +++++++++++--
- 1 file changed, 11 insertions(+), 2 deletions(-)
-
-diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
-index dfc72c779951..dc7665d5fd46 100644
---- a/src/gallium/drivers/panfrost/pan_job.c
-+++ b/src/gallium/drivers/panfrost/pan_job.c
-@@ -174,8 +174,10 @@ panfrost_get_batch(struct panfrost_context *ctx,
-         assert(batch);
- 
-         /* The selected slot is used, we need to flush the batch */
--        if (batch->seqnum)
-+        if (batch->seqnum) {
-+                perf_debug_ctx(ctx, "Flushing batch due to seqnum overflow");
-                 panfrost_batch_submit(ctx, batch);
-+        }
- 
-         panfrost_batch_init(ctx, key, batch);
- 
-@@ -262,8 +264,15 @@ panfrost_batch_update_access(struct panfrost_batch *batch,
-                                 continue;
- 
-                         /* Submit if it's a user */
--                        if (_mesa_set_search(batch->resources, rsrc))
-+                        if (_mesa_set_search(batch->resources, rsrc)) {
-+                                perf_debug_ctx(ctx,
-+                                               "Flushing %s %" PRIu64 " due to %s of %s",
-+                                               writer == batch ? "writer" : "reader",
-+                                               batch->seqnum,
-+                                               writes ? "write" : "read",
-+                                               rsrc->image.data.bo->label);
-                                 panfrost_batch_submit(ctx, batch);
-+                        }
-                 }
-         }
- 
--- 
-GitLab
-
-
-From b18be9cb3eb95c37b8f613eb17d7a3fc7803561d Mon Sep 17 00:00:00 2001
+From a6c80b8588c560e83814608505198f8e51a9ef45 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Sun, 30 Oct 2022 21:24:34 -0400
-Subject: [PATCH 12/15] panfrost: Use
+Subject: [PATCH 08/14] panfrost: Use
  PIPE_CAP_VERTEX_ATTRIB_ELEMENT_ALIGNED_ONLY
 
 ..instead of 4BYTE_ALIGNED_ONLY. This is more correct and avoids
@@ -886,10 +736,136 @@ index f0ecae940bb0..a3855f9302e3 100644
 GitLab
 
 
-From 2b5e04c0bdd5c017793d784798cc4baf9aac5107 Mon Sep 17 00:00:00 2001
+From a6f92f4e020060811e2df6596c5bd0aee39117a0 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 16:41:05 -0400
+Subject: [PATCH 09/14] panfrost: Don't set job_barrier on vertex jobs
+
+This was a hack needed for the old transform feedback code. This barrier
+is handled by the explicit XFB emulation that we're using on Midgard
+now, so we don't need the barrier in the general case.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_cmdstream.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
+index cd6a0641c1ee..e71d9754b1eb 100644
+--- a/src/gallium/drivers/panfrost/pan_cmdstream.c
++++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
+@@ -2658,12 +2658,8 @@ panfrost_emit_vertex_tiler_jobs(struct panfrost_batch *batch,
+ {
+         struct panfrost_context *ctx = batch->ctx;
+ 
+-        /* XXX - set job_barrier in case buffers get ping-ponged and we need to
+-         * enforce ordering, this has a perf hit! See
+-         * KHR-GLES31.core.vertex_attrib_binding.advanced-iterations
+-         */
+         unsigned vertex = panfrost_add_job(&batch->pool.base, &batch->scoreboard,
+-                                           MALI_JOB_TYPE_VERTEX, true, false,
++                                           MALI_JOB_TYPE_VERTEX, false, false,
+                                            ctx->indirect_draw ?
+                                            batch->indirect_draw_job_id : 0,
+                                            0, vertex_job, false);
+-- 
+GitLab
+
+
+From 9aa03d2f7f049ebb3e42f9cfac3e3a0706d32e54 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 18:13:16 -0400
+Subject: [PATCH 10/14] panfrost: Print perf debug when flushing everything
+
+..Even if the only batch is the one that's currently bound.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_job.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index 27be0ee10ed6..e4c9ddfc9537 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -886,16 +886,15 @@ out:
+ void
+ panfrost_flush_all_batches(struct panfrost_context *ctx, const char *reason)
+ {
++        if (reason)
++                perf_debug_ctx(ctx, "Flushing everything due to: %s", reason);
++
+         struct panfrost_batch *batch = panfrost_get_batch_for_fbo(ctx);
+         panfrost_batch_submit(ctx, batch);
+ 
+         for (unsigned i = 0; i < PAN_MAX_BATCHES; i++) {
+-                if (ctx->batches.slots[i].seqnum) {
+-                        if (reason)
+-                                perf_debug_ctx(ctx, "Flushing everything due to: %s", reason);
+-
++                if (ctx->batches.slots[i].seqnum)
+                         panfrost_batch_submit(ctx, &ctx->batches.slots[i]);
+-                }
+         }
+ }
+ 
+-- 
+GitLab
+
+
+From e6c9a8b4779123ad9535e84a4e75132eec9303c2 Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@collabora.com>
+Date: Sat, 29 Oct 2022 18:16:22 -0400
+Subject: [PATCH 11/14] panfrost: Add more perf warnings for flushes
+
+These flushes were lurking.
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
+---
+ src/gallium/drivers/panfrost/pan_job.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/panfrost/pan_job.c b/src/gallium/drivers/panfrost/pan_job.c
+index e4c9ddfc9537..f95ca12fa262 100644
+--- a/src/gallium/drivers/panfrost/pan_job.c
++++ b/src/gallium/drivers/panfrost/pan_job.c
+@@ -229,8 +229,10 @@ panfrost_get_batch(struct panfrost_context *ctx,
+         assert(batch);
+ 
+         /* The selected slot is used, we need to flush the batch */
+-        if (batch->seqnum)
++        if (batch->seqnum) {
++                perf_debug_ctx(ctx, "Flushing batch due to seqnum overflow");
+                 panfrost_batch_submit(ctx, batch);
++        }
+ 
+         panfrost_batch_init(ctx, key, batch);
+ 
+@@ -308,8 +310,15 @@ panfrost_batch_update_access(struct panfrost_batch *batch,
+                                 continue;
+ 
+                         /* Submit if it's a user */
+-                        if (panfrost_batch_uses_resource(batch, rsrc))
++                        if (panfrost_batch_uses_resource(batch, rsrc)) {
++                                perf_debug_ctx(ctx,
++                                               "Flushing %s %" PRIu64 " due to %s of %s",
++                                               writer == batch ? "writer" : "reader",
++                                               batch->seqnum,
++                                               writes ? "write" : "read",
++                                               rsrc->image.data.bo->label);
+                                 panfrost_batch_submit(ctx, batch);
++                        }
+                 }
+         }
+ 
+-- 
+GitLab
+
+
+From 838d80aefbc37ecc967d9090fb20df425e755619 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Sun, 30 Oct 2022 21:37:51 -0400
-Subject: [PATCH 13/15] panfrost: Don't round up polygon list BOs
+Subject: [PATCH 12/14] panfrost: Don't round up polygon list BOs
 
 Can waste large amounts of megabytes (11MB -> 16MB in one cases, wasting
 5MB... which adds up across processes, especially on the 2GB machines.)
@@ -900,10 +876,10 @@ Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
  1 file changed, 1 deletion(-)
 
 diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
-index 1bedc58b3a80..f7b1b12afc60 100644
+index e71d9754b1eb..73cadbe98827 100644
 --- a/src/gallium/drivers/panfrost/pan_cmdstream.c
 +++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
-@@ -4745,7 +4745,6 @@ batch_get_polygon_list(struct panfrost_batch *batch)
+@@ -4754,7 +4754,6 @@ batch_get_polygon_list(struct panfrost_batch *batch)
                                                               batch->key.width,
                                                               batch->key.height,
                                                               has_draws);
@@ -915,10 +891,10 @@ index 1bedc58b3a80..f7b1b12afc60 100644
 GitLab
 
 
-From 7be4079b367a889d2cbcff328f5b6f8e4daf64e4 Mon Sep 17 00:00:00 2001
+From aa630a38e6ef0b2bc998352a527afd5943d2a098 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Sun, 30 Oct 2022 23:33:48 -0400
-Subject: [PATCH 14/15] panfrost: Clean up tiler calculations
+Subject: [PATCH 13/14] panfrost: Clean up tiler calculations
 
 Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
 ---
@@ -1011,10 +987,10 @@ index e8bce5e2a609..72aad4dedc62 100644
 GitLab
 
 
-From d2c5dfe5e3d6cc236a1dba29b35e6cea6f274566 Mon Sep 17 00:00:00 2001
+From d8c24483d8a0cda964a4d33f1711175abe175e6f Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@collabora.com>
 Date: Sun, 30 Oct 2022 23:34:13 -0400
-Subject: [PATCH 15/15] panfrost: Heuristic to choose hier masks
+Subject: [PATCH 14/14] panfrost: Heuristic to choose hier masks
 
 Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
 ---
@@ -1026,7 +1002,7 @@ Signed-off-by: Alyssa Rosenzweig <alyssa@collabora.com>
  5 files changed, 45 insertions(+), 15 deletions(-)
 
 diff --git a/src/gallium/drivers/panfrost/pan_cmdstream.c b/src/gallium/drivers/panfrost/pan_cmdstream.c
-index f7b1b12afc60..0f52e86c0e14 100644
+index 73cadbe98827..18b53fb7477a 100644
 --- a/src/gallium/drivers/panfrost/pan_cmdstream.c
 +++ b/src/gallium/drivers/panfrost/pan_cmdstream.c
 @@ -3667,6 +3667,9 @@ panfrost_direct_draw(struct panfrost_batch *batch,
@@ -1050,7 +1026,7 @@ index f7b1b12afc60..0f52e86c0e14 100644
          }
  
          if (info->instance_count > 1) {
-@@ -4739,12 +4744,12 @@ batch_get_polygon_list(struct panfrost_batch *batch)
+@@ -4748,12 +4753,12 @@ batch_get_polygon_list(struct panfrost_batch *batch)
          struct panfrost_device *dev = pan_device(batch->ctx->base.screen);
  
          if (!batch->tiler_ctx.midgard.polygon_list) {
@@ -1066,10 +1042,10 @@ index f7b1b12afc60..0f52e86c0e14 100644
                  /* Create the BO as invisible if we can. If there are no draws,
                   * we need to write the polygon list manually because there's
 diff --git a/src/panfrost/lib/pan_cs.c b/src/panfrost/lib/pan_cs.c
-index cf405292c1b1..57384ac74d3a 100644
+index 7a62dcb3e0f8..07fca511da37 100644
 --- a/src/panfrost/lib/pan_cs.c
 +++ b/src/panfrost/lib/pan_cs.c
-@@ -603,7 +603,8 @@ pan_emit_midgard_tiler(const struct panfrost_device *dev,
+@@ -601,7 +601,8 @@ pan_emit_midgard_tiler(const struct panfrost_device *dev,
                          cfg.hierarchy_mask =
                                  panfrost_choose_hierarchy_mask(fb->width,
                                                                 fb->height,
