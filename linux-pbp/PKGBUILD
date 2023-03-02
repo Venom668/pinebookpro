@@ -2,7 +2,7 @@
 # Contributor: Dan Johansen <strit@manjaro.org>
 
 pkgbase=linux-pbp
-pkgver=6.0.12
+pkgver=6.2.1
 pkgrel=1
 _kernelname=${pkgbase#linux}
 _srcname=linux-${pkgver}
@@ -16,16 +16,12 @@ source=("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${pkgver}.tar.xz"
         'config'
         'linux.preset'
         '60-linux.hook'
-        '90-linux.hook'
-
-        'drm-rockchip-support-gamma-control-on-RK3399.patch')
-sha256sums=('89b730edf8942b49e02f9894244205886c9a214d629b35b88c4ff06ee9304f01'
-            'dfa6db5ea124cfa6e45a46c49c0d583cfc21baf0712811d3b719df521627d91b'
+        '90-linux.hook')
+sha256sums=('2fcc07e1c90ea4ce148f50f9beeb0dca0b6e4b379a768de8abc7a4a26f252534'
+            'd7e11e1a251ae1be3d2b049aae3a1b7411af986d4b2c5c906cf28d300a85cbba'
             '66644820faa950a5fc59181f5aefcbed6d7ed652b29aee69979a2be2a032025d'
             '452b8d4d71e1565ca91b1bebb280693549222ef51c47ba8964e411b2d461699c'
-            '71df1b18a3885b151a3b9d926a91936da2acc90d5e27f1ad326745779cd3759d'
-
-            '0f2ed113f777020e6223f7237d50c3962fc4d97f6896258c4dc3288d6d27854f')
+            '71df1b18a3885b151a3b9d926a91936da2acc90d5e27f1ad326745779cd3759d')
 prepare() {
   cd "${srcdir}/${_srcname}"
 
