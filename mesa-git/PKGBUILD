@@ -12,7 +12,7 @@
 
 pkgname=mesa-git
 pkgdesc="an open-source implementation of the OpenGL specification, git version"
-pkgver=23.0.0_devel.164116.3895545b834
+pkgver=23.1.0_devel.167505.427fd83d27f
 pkgrel=1
 arch=('aarch64')
 makedepends=('git' 'python-mako' 'xorgproto'
@@ -27,12 +27,10 @@ url="https://www.mesa3d.org"
 license=('custom')
 source=('mesa::git+https://gitlab.freedesktop.org/mesa/mesa.git#branch=main'
         'LICENSE'
-        '12796.patch'
-        'https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/19482.patch')
+        '12796.patch')
 sha512sums=('SKIP'
             '25da77914dded10c1f432ebcbf29941124138824ceecaf1367b3deedafaecabc082d463abcfa3d15abff59f177491472b505bcb5ba0c4a51bb6b93b4721a23c2'
-            '1a39ff413f743ae7d596031128ffb3b7e431c53a6056e39d88aa34ce990d9796364231184ac64944e0f91d51a9b0f1f720ad332e4e2eafb1903cb00eb6f2ec2d'
-            '302e549ccd52bc86ad6e1cbee99820a3762cc8b746a276ec242a010a52e33f4cc3a6e60fd963b9ceced5ffd6a3427d31398d8a90efcf3a9aac91b31e57ac93c0')
+            '1a39ff413f743ae7d596031128ffb3b7e431c53a6056e39d88aa34ce990d9796364231184ac64944e0f91d51a9b0f1f720ad332e4e2eafb1903cb00eb6f2ec2d')
 
 # NINJAFLAGS is an env var used to pass commandline options to ninja
 # NOTE: It's your responbility to validate the value of $NINJAFLAGS. If unsure, don't set it.
@@ -62,7 +60,6 @@ prepare() {
         rm -rf _build
     fi
 
-    git apply $srcdir/19482.patch
     #patch -Np1 -d $srcdir/mesa < 12796.patch
 }
 
@@ -70,7 +67,6 @@ build () {
     meson setup mesa _build \
         -D prefix=/usr \
         -D sysconfdir=/etc \
-        -D dri-drivers= \
         -D gallium-drivers=panfrost,swrast \
         -D gallium-nine=true \
         -D vulkan-drivers=panfrost \
